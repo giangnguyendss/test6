@@ -1,0 +1,120 @@
+Feature: Advanced Sales Performance Analysis using PySpark on sales_window Table
+
+  This feature calculates advanced KPIs including Total Sales, Sales Trends, and Final KPI aggregations
+  across multiple dimensions (Region, Product, Quarter) using the source table 'sales_window' in Unity Catalog
+  (purgo_databricks.purgo_playground.sales_window). The outputs are: Total_Sales, Sales_Trends, and Final_KPI.
+
+  Background:
+    Given the source table "purgo_databricks.purgo_playground.sales_window" exists
+    And the table contains columns: Sale_ID (string), Region (string), Product (string), Sales_Amount (decimal), Sale_Date (date)
+    And the "Sale_Date" column is used to determine the quarter in format "YYYY-QN" (e.g., 2024-Q1)
+    And all sales are included (no filters on status or returns)
+    And the analysis covers all available data in the table
+
+  # Total_Sales Calculation
+  Scenario: Calculate Total and Average Sales Amount by Region and Product
+    When the user groups sales data by "Region" and "Product"
+    And calculates the sum of "Sales_Amount" as "Total_Sales_Amount"
+    And calculates the average of "Sales_Amount" as "Average_Sales_Amount"
+    Then the output table "Total_Sales" contains columns: Region, Product, Total_Sales_Amount (decimal), Average_Sales_Amount (decimal)
+    And all numeric values are rounded to 2 decimal places
+
+  # Sales_Trends Calculation
+  Scenario: Calculate Sales Trends by Region, Product, and Quarter
+    When the user groups sales data by "Region", "Product", and "Quarter" (derived from "Sale_Date")
+    And orders the data by "Region", "Product", and "Quarter" ascending
+    And calculates the sum of "Sales_Amount" as "Sales_Amount" for each group
+    And calculates "Previous_Sales_Amount" as the "Sales_Amount" of the previous quarter for the same Region and Product (null for first quarter)
+    And calculates "Sales_Change" as "Sales_Amount" minus "Previous_Sales_Amount" (null if "Previous_Sales_Amount" is null)
+    Then the output table "Sales_Trends" contains columns: Region, Product, Quarter, Sales_Amount (decimal), Previous_Sales_Amount (decimal), Sales_Change (decimal)
+    And all numeric values are rounded to 2 decimal places
+
+  # Top_Selling_Products Calculation
+  Scenario Outline: Identify Top N Selling Products by Total Sales Amount per Region
+    When the user groups sales data by "Region" and "Product"
+    And calculates the sum of "Sales_Amount" as "Total_Sales_Amount"
+    And ranks products within each Region by "Total_Sales_Amount" in descending order
+    And selects the top <N> products per Region
+    Then the output table "Top_Selling_Products" contains columns: Region, Product, Total_Sales_Amount (decimal), Product_Rank (integer)
+    And all numeric values are rounded to 2 decimal places
+
+    Examples:
+      | N  |
+      | 3  |
+      | 5  |
+
+  # Final_KPI Aggregation
+  Scenario: Aggregate and Join KPI Results into Final_KPI Table
+    Given the "Total_Sales" table is available
+    And the "Top_Selling_Products" table is available for N=3
+    And the "Sales_Trends" table is available
+    When the user joins "Total_Sales" and "Top_Selling_Products" on Region and Product
+    And joins the result with "Sales_Trends" on Region and Product
+    Then the output table "Final_KPI" contains columns:
+      | Region | Product | Total_Sales_Amount | Average_Sales_Amount | Product_Rank | Quarter | Sales_Amount | Previous_Sales_Amount | Sales_Change |
+    And all numeric values are rounded to 2 decimal places
+    And only products present in "Top_Selling_Products" (N=3) are included
+
+  # Output Validation
+  Scenario: Validate Output Data Types and Formats
+    Then all "Total_Sales_Amount", "Average_Sales_Amount", "Sales_Amount", "Previous_Sales_Amount", and "Sales_Change" columns are decimal(18,2)
+    And "Product_Rank" is integer
+    And "Quarter" is in format "YYYY-QN" (e.g., 2024-Q1)
+    And "Region" and "Product" are string
+
+  # Error Scenarios
+  Scenario: Handle Missing or Null Sales_Amount Values
+    Given there are rows in "sales_window" with null "Sales_Amount"
+    When calculating any aggregate or trend
+    Then null "Sales_Amount" values are excluded from all calculations
+    And if all "Sales_Amount" values for a group are null, the output for that group is null
+
+  Scenario: Handle Missing Sale_Date Values
+    Given there are rows in "sales_window" with null "Sale_Date"
+    When deriving "Quarter" or grouping by quarter
+    Then such rows are excluded from "Sales_Trends" and "Final_KPI" outputs
+    And an error message "Sale_Date is required for trend analysis" is logged
+
+  Scenario: Handle Empty Source Table
+    Given the "sales_window" table is empty
+    When running any calculation
+    Then all output tables ("Total_Sales", "Sales_Trends", "Top_Selling_Products", "Final_KPI") are empty
+    And a warning message "No sales data available for analysis" is logged
+
+  # Output Delivery
+  Scenario: Store Output Tables in Unity Catalog
+    When the output tables are generated
+    Then "Total_Sales" is stored as "purgo_databricks.purgo_playground.total_sales"
+    And "Sales_Trends" is stored as "purgo_databricks.purgo_playground.sales_trends"
+    And "Top_Selling_Products" is stored as "purgo_databricks.purgo_playground.top_selling_products"
+    And "Final_KPI" is stored as "purgo_databricks.purgo_playground.final_kpi"
+    And all tables are in Delta format
+
+  # Data-Driven Validation for Sales Trends
+  Scenario Outline: Validate Sales_Change Calculation for Specific Data Points
+    Given the following sales data:
+      | Region   | Product   | Quarter   | Sales_Amount |
+      | <Region> | <Product> | <Q1>      | <SA1>        |
+      | <Region> | <Product> | <Q2>      | <SA2>        |
+    When calculating "Sales_Trends"
+    Then for <Q2>, "Previous_Sales_Amount" is <SA1>
+    And "Sales_Change" is <SA2> - <SA1>
+
+    Examples:
+      | Region | Product | Q1      | SA1   | Q2      | SA2   |
+      | East   | Widget  | 2024-Q1 | 100.0 | 2024-Q2 | 150.0 |
+      | West   | Gadget  | 2024-Q2 | 200.0 | 2024-Q3 | 180.0 |
+
+  # Validation Rules
+  Scenario: Enforce Validation Rules on Input Data
+    When reading from "sales_window"
+    Then "Sales_Amount" must be a non-negative decimal
+    And "Sale_Date" must be a valid date
+    And rows failing validation are excluded from all outputs
+    And an error message is logged for each excluded row
+
+  # Acceptance Criteria
+  Scenario: Acceptance Criteria for Advanced Sales Performance Analysis
+    Then all calculations and outputs must match the requirements for Total_Sales, Sales_Trends, Top_Selling_Products, and Final_KPI
+    And all error and validation scenarios are handled as specified
+    And all outputs are stored in Unity Catalog as Delta tables with correct schema and data types
