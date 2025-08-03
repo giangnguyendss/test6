@@ -1,0 +1,204 @@
+Feature: Calculate and Report Total Time Elapsed (TAT) for Patient Foundation New Enrollment Review
+
+  This feature calculates the total time elapsed (TAT) for "Patient Foundation" service requests by joining the pat_case and sr_activity tables, applying business rules for date calculation, and loading the results into the tat_report table.
+
+  Background:
+    Given the Unity Catalog is "purgo_databricks"
+    And the schema is "purgo_playground"
+    And the source table "pat_case" has columns: case_id (string), service_request_type (string), sr_created_date (timestamp)
+    And the source table "sr_activity" has columns: activity_id (string), case_id (string), subject (string), last_modified_date (timestamp), status (string)
+    And the target table "tat_report" has columns: case_id (string), service_request_type (string), sr_created_date (timestamp), end_date (timestamp), total_time_elapsed (bigint)
+    And only cases with service_request_type = "Patient Foundation" are to be processed
+    And only sr_activity records with subject = "Perform New Enrollment Review Activity" and status = "Completed" are to be considered
+    And for each case_id, the minimum last_modified_date from sr_activity is used as end_date
+    And total_time_elapsed is calculated as the number of days between end_date (date only) and sr_created_date (date only), adjusted for weekends (weekends excluded from the count)
+    And if end_date < sr_created_date, or if either date is NULL, then total_time_elapsed is NULL
+    And if end_date = sr_created_date, then total_time_elapsed is 0
+    And the output table tat_report should be overwritten on each run
+
+  Scenario Outline: Calculate total_time_elapsed for valid Patient Foundation cases (happy path)
+    Given a pat_case record with
+      | case_id     | service_request_type   | sr_created_date        |
+      | <case_id>   | Patient Foundation     | <sr_created_date>      |
+    And one or more sr_activity records with
+      | case_id     | subject                                 | status     | last_modified_date      |
+      | <case_id>   | Perform New Enrollment Review Activity   | Completed  | <last_modified_date_1>  |
+      | <case_id>   | Perform New Enrollment Review Activity   | Completed  | <last_modified_date_2>  |
+    When the script runs
+    Then tat_report should contain a record with
+      | case_id     | service_request_type   | sr_created_date        | end_date                | total_time_elapsed |
+      | <case_id>   | Patient Foundation     | <sr_created_date>      | <min_last_modified_date>| <expected_tat>    |
+
+    Examples:
+      | case_id | sr_created_date      | last_modified_date_1 | last_modified_date_2 | min_last_modified_date | expected_tat |
+      | C001    | 2024-06-01T10:00:00 | 2024-06-05T09:00:00  | 2024-06-03T15:00:00  | 2024-06-03T15:00:00    | 1            |
+      | C002    | 2024-06-07T08:00:00 | 2024-06-10T12:00:00  | 2024-06-09T18:00:00  | 2024-06-09T18:00:00    | 1            |
+      | C003    | 2024-06-14T09:00:00 | 2024-06-17T11:00:00  | 2024-06-18T10:00:00  | 2024-06-17T11:00:00    | 1            |
+
+      # Note: expected_tat is the number of weekdays between sr_created_date (date only) and min_last_modified_date (date only), excluding weekends.
+
+  Scenario: total_time_elapsed is 0 when start and end date are the same (same day)
+    Given a pat_case record with
+      | case_id | service_request_type   | sr_created_date        |
+      | C004    | Patient Foundation     | 2024-06-10T08:00:00   |
+    And a sr_activity record with
+      | case_id | subject                               | status     | last_modified_date      |
+      | C004    | Perform New Enrollment Review Activity | Completed  | 2024-06-10T17:00:00    |
+    When the script runs
+    Then tat_report should contain a record with
+      | case_id | service_request_type   | sr_created_date        | end_date                | total_time_elapsed |
+      | C004    | Patient Foundation     | 2024-06-10T08:00:00   | 2024-06-10T17:00:00    | 0                 |
+
+  Scenario Outline: total_time_elapsed is NULL when end_date < sr_created_date
+    Given a pat_case record with
+      | case_id | service_request_type   | sr_created_date        |
+      | <case_id> | Patient Foundation   | <sr_created_date>      |
+    And a sr_activity record with
+      | case_id | subject                               | status     | last_modified_date      |
+      | <case_id> | Perform New Enrollment Review Activity | Completed  | <last_modified_date>    |
+    When the script runs
+    Then tat_report should contain a record with
+      | case_id | service_request_type   | sr_created_date        | end_date                | total_time_elapsed |
+      | <case_id> | Patient Foundation   | <sr_created_date>      | <last_modified_date>    | NULL              |
+
+    Examples:
+      | case_id | sr_created_date        | last_modified_date     |
+      | C005    | 2024-06-10T08:00:00   | 2024-06-09T17:00:00   |
+      | C006    | 2024-06-15T10:00:00   | 2024-06-14T09:00:00   |
+
+  Scenario Outline: total_time_elapsed is NULL when either start or end date is NULL
+    Given a pat_case record with
+      | case_id | service_request_type   | sr_created_date        |
+      | <case_id> | Patient Foundation   | <sr_created_date>      |
+    And a sr_activity record with
+      | case_id | subject                               | status     | last_modified_date      |
+      | <case_id> | Perform New Enrollment Review Activity | Completed  | <last_modified_date>    |
+    When the script runs
+    Then tat_report should contain a record with
+      | case_id | service_request_type   | sr_created_date        | end_date                | total_time_elapsed |
+      | <case_id> | Patient Foundation   | <sr_created_date>      | <last_modified_date>    | NULL              |
+
+    Examples:
+      | case_id | sr_created_date        | last_modified_date     |
+      | C007    | NULL                  | 2024-06-12T10:00:00   |
+      | C008    | 2024-06-12T10:00:00   | NULL                  |
+
+  Scenario: No sr_activity records found for a valid pat_case
+    Given a pat_case record with
+      | case_id | service_request_type   | sr_created_date        |
+      | C009    | Patient Foundation     | 2024-06-10T08:00:00   |
+    And no sr_activity records exist for case_id C009 with subject "Perform New Enrollment Review Activity" and status "Completed"
+    When the script runs
+    Then tat_report should contain a record with
+      | case_id | service_request_type   | sr_created_date        | end_date | total_time_elapsed |
+      | C009    | Patient Foundation     | 2024-06-10T08:00:00   | NULL     | NULL              |
+
+  Scenario: pat_case with service_request_type not equal to "Patient Foundation" is ignored
+    Given a pat_case record with
+      | case_id | service_request_type   | sr_created_date        |
+      | C010    | Other Service          | 2024-06-10T08:00:00   |
+    And a sr_activity record with
+      | case_id | subject                               | status     | last_modified_date      |
+      | C010    | Perform New Enrollment Review Activity | Completed  | 2024-06-12T10:00:00    |
+    When the script runs
+    Then tat_report should not contain any record with case_id C010
+
+  Scenario: sr_activity with subject or status not matching is ignored
+    Given a pat_case record with
+      | case_id | service_request_type   | sr_created_date        |
+      | C011    | Patient Foundation     | 2024-06-10T08:00:00   |
+    And a sr_activity record with
+      | case_id | subject                               | status     | last_modified_date      |
+      | C011    | Other Activity                        | Completed  | 2024-06-12T10:00:00    |
+    And a sr_activity record with
+      | case_id | subject                               | status     | last_modified_date      |
+      | C011    | Perform New Enrollment Review Activity | In Progress| 2024-06-12T10:00:00    |
+    When the script runs
+    Then tat_report should contain a record with
+      | case_id | service_request_type   | sr_created_date        | end_date | total_time_elapsed |
+      | C011    | Patient Foundation     | 2024-06-10T08:00:00   | NULL     | NULL              |
+
+  Scenario: Multiple pat_case records processed in a single run
+    Given the following pat_case records:
+      | case_id | service_request_type   | sr_created_date        |
+      | C012    | Patient Foundation     | 2024-06-01T10:00:00   |
+      | C013    | Patient Foundation     | 2024-06-02T10:00:00   |
+    And the following sr_activity records:
+      | case_id | subject                               | status     | last_modified_date      |
+      | C012    | Perform New Enrollment Review Activity | Completed  | 2024-06-03T15:00:00    |
+      | C013    | Perform New Enrollment Review Activity | Completed  | 2024-06-05T09:00:00    |
+    When the script runs
+    Then tat_report should contain records:
+      | case_id | service_request_type   | sr_created_date        | end_date                | total_time_elapsed |
+      | C012    | Patient Foundation     | 2024-06-01T10:00:00   | 2024-06-03T15:00:00    | 1                 |
+      | C013    | Patient Foundation     | 2024-06-02T10:00:00   | 2024-06-05T09:00:00    | 2                 |
+
+  Scenario: tat_report table is overwritten on each run
+    Given tat_report contains previous records
+    And new pat_case and sr_activity records are available for processing
+    When the script runs
+    Then tat_report should only contain records from the current run
+
+  Scenario: Timestamps in different time zones are handled in UTC
+    Given a pat_case record with
+      | case_id | service_request_type   | sr_created_date        |
+      | C014    | Patient Foundation     | 2024-06-10T23:00:00Z  |
+    And a sr_activity record with
+      | case_id | subject                               | status     | last_modified_date      |
+      | C014    | Perform New Enrollment Review Activity | Completed  | 2024-06-12T01:00:00Z   |
+    When the script runs
+    Then tat_report should contain a record with
+      | case_id | service_request_type   | sr_created_date        | end_date                | total_time_elapsed |
+      | C014    | Patient Foundation     | 2024-06-10T23:00:00Z  | 2024-06-12T01:00:00Z   | 1                 |
+
+  Scenario: Weekend days are excluded from total_time_elapsed calculation
+    Given a pat_case record with
+      | case_id | service_request_type   | sr_created_date        |
+      | C015    | Patient Foundation     | 2024-06-07T10:00:00   | # Friday
+    And a sr_activity record with
+      | case_id | subject                               | status     | last_modified_date      |
+      | C015    | Perform New Enrollment Review Activity | Completed  | 2024-06-10T09:00:00    | # Monday
+    When the script runs
+    Then tat_report should contain a record with
+      | case_id | service_request_type   | sr_created_date        | end_date                | total_time_elapsed |
+      | C015    | Patient Foundation     | 2024-06-07T10:00:00   | 2024-06-10T09:00:00    | 1                 |
+
+  Scenario: If multiple sr_activity records exist for a case_id, use the minimum last_modified_date
+    Given a pat_case record with
+      | case_id | service_request_type   | sr_created_date        |
+      | C016    | Patient Foundation     | 2024-06-01T10:00:00   |
+    And sr_activity records with
+      | case_id | subject                               | status     | last_modified_date      |
+      | C016    | Perform New Enrollment Review Activity | Completed  | 2024-06-05T09:00:00    |
+      | C016    | Perform New Enrollment Review Activity | Completed  | 2024-06-03T15:00:00    |
+      | C016    | Perform New Enrollment Review Activity | Completed  | 2024-06-04T12:00:00    |
+    When the script runs
+    Then tat_report should contain a record with
+      | case_id | service_request_type   | sr_created_date        | end_date                | total_time_elapsed |
+      | C016    | Patient Foundation     | 2024-06-01T10:00:00   | 2024-06-03T15:00:00    | 0                 |
+
+  Scenario: Only new data is processed on each run (incremental load)
+    Given tat_report contains records up to 2024-06-10
+    And new pat_case and sr_activity records with sr_created_date > 2024-06-10 are available
+    When the script runs
+    Then tat_report should contain only records for cases with sr_created_date > 2024-06-10
+
+  Scenario: All columns from pat_case are included in tat_report along with end_date and total_time_elapsed
+    Given a pat_case record with
+      | case_id | service_request_type   | sr_created_date        |
+      | C017    | Patient Foundation     | 2024-06-10T08:00:00   |
+    And a sr_activity record with
+      | case_id | subject                               | status     | last_modified_date      |
+      | C017    | Perform New Enrollment Review Activity | Completed  | 2024-06-12T10:00:00    |
+    When the script runs
+    Then tat_report should contain a record with all columns from pat_case, plus end_date and total_time_elapsed
+
+  # Validation rules
+  # - total_time_elapsed = NULL if end_date < sr_created_date or either is NULL
+  # - total_time_elapsed = 0 if end_date = sr_created_date (date only)
+  # - total_time_elapsed = number of weekdays between sr_created_date (date only) and end_date (date only), exclusive of weekends
+  # - Only "Patient Foundation" cases are processed
+  # - Only sr_activity with subject "Perform New Enrollment Review Activity" and status "Completed" are considered
+  # - For each case_id, use the minimum last_modified_date as end_date
+  # - tat_report is overwritten on each run
+  # - All columns from pat_case are included in tat_report, plus end_date and total_time_elapsed
