@@ -1,0 +1,126 @@
+Feature: Calculation of apl_qty in purgo_playground.f_inv_movmnt_apl_qty
+
+  This feature specifies the calculation of the field apl_qty in the table purgo_playground.f_inv_movmnt_apl_qty based on the defined business logic involving ref_txn_qty, cumulative_txn_qty, cumulative_ref_ord_sched_qty, ref_ord_sched_qty, prior_cumulative_txn_qty, and prior_cumulative_ref_ord_sched_qty. The calculation must handle positive, negative, and default scenarios, and must validate all input data and error conditions.
+
+  Background:
+    Given the table "purgo_playground.f_inv_movmnt_apl_qty" exists with columns:
+      | txn_id | ref_txn_qty | cumulative_txn_qty | cumulative_ref_ord_sched_qty | ref_ord_sched_qty | prior_cumulative_txn_qty | prior_cumulative_ref_ord_sched_qty | apl_qty |
+    And all columns are of type decimal except txn_id (string)
+    And the field apl_qty is nullable
+
+  # Happy Path: Condition 1
+  Scenario Outline: Calculate apl_qty when ref_txn_qty > 0 and cumulative_txn_qty >= cumulative_ref_ord_sched_qty (Condition 1)
+    Given a record with
+      | ref_txn_qty                  | cumulative_txn_qty           | cumulative_ref_ord_sched_qty    | ref_ord_sched_qty           | prior_cumulative_txn_qty          | prior_cumulative_ref_ord_sched_qty |
+      | <ref_txn_qty>                | <cumulative_txn_qty>         | <cumulative_ref_ord_sched_qty>  | <ref_ord_sched_qty>         | <prior_cumulative_txn_qty>        | <prior_cumulative_ref_ord_sched_qty> |
+    When the calculation logic is applied
+    Then the value of apl_qty should be <expected_apl_qty>
+
+    Examples:
+      | ref_txn_qty | cumulative_txn_qty | cumulative_ref_ord_sched_qty | ref_ord_sched_qty | prior_cumulative_txn_qty | prior_cumulative_ref_ord_sched_qty | expected_apl_qty |
+      | 50          | 100                | 90                           | 50                | 40                       | 30                                 | 40              | # 50 - (40-30)
+      | 20          | 100                | 90                           | 30                | 20                       | 25                                 | 30              | # prior_cumulative_ref_ord_sched_qty < prior_cumulative_txn_qty is false, so apl_qty = ref_ord_sched_qty
+
+  # Happy Path: Condition 2
+  Scenario Outline: Calculate apl_qty when ref_txn_qty > 0 and cumulative_ref_ord_sched_qty >= cumulative_txn_qty (Condition 2)
+    Given a record with
+      | ref_txn_qty                  | cumulative_txn_qty           | cumulative_ref_ord_sched_qty    | ref_ord_sched_qty           | prior_cumulative_txn_qty          | prior_cumulative_ref_ord_sched_qty |
+      | <ref_txn_qty>                | <cumulative_txn_qty>         | <cumulative_ref_ord_sched_qty>  | <ref_ord_sched_qty>         | <prior_cumulative_txn_qty>        | <prior_cumulative_ref_ord_sched_qty> |
+    When the calculation logic is applied
+    Then the value of apl_qty should be <expected_apl_qty>
+
+    Examples:
+      | ref_txn_qty | cumulative_txn_qty | cumulative_ref_ord_sched_qty | ref_ord_sched_qty | prior_cumulative_txn_qty | prior_cumulative_ref_ord_sched_qty | expected_apl_qty |
+      | 20          | 60                 | 100                          | 30                | 30                       | 25                                 | 20              | # prior_cumulative_ref_ord_sched_qty > prior_cumulative_txn_qty is false, so apl_qty = ref_txn_qty
+      | 15          | 40                 | 50                           | 10                | 10                       | 20                                 | 5               | # 15 - (20-10) = 5
+
+  # Happy Path: Condition 3
+  Scenario Outline: Calculate apl_qty when ref_txn_qty < 0, cumulative_txn_qty != 0, and cumulative_ref_ord_sched_qty > 0 (Condition 3)
+    Given a record with
+      | ref_txn_qty                  | cumulative_txn_qty           | cumulative_ref_ord_sched_qty    | ref_ord_sched_qty           | prior_cumulative_txn_qty          | prior_cumulative_ref_ord_sched_qty |
+      | <ref_txn_qty>                | <cumulative_txn_qty>         | <cumulative_ref_ord_sched_qty>  | <ref_ord_sched_qty>         | <prior_cumulative_txn_qty>        | <prior_cumulative_ref_ord_sched_qty> |
+    When the calculation logic is applied
+    Then the value of apl_qty should be <expected_apl_qty>
+
+    Examples:
+      | ref_txn_qty | cumulative_txn_qty | cumulative_ref_ord_sched_qty | ref_ord_sched_qty | prior_cumulative_txn_qty | prior_cumulative_ref_ord_sched_qty | expected_apl_qty |
+      | -10         | 80                 | 70                           | 40                | 50                       | 45                                 | -10             |
+      | -5          | 10                 | 1                            | 2                 | 0                        | 0                                  | -5              |
+
+  # Error/Edge Case: Default (None of the conditions met)
+  Scenario Outline: Set apl_qty to NULL when none of the conditions are met (Default)
+    Given a record with
+      | ref_txn_qty                  | cumulative_txn_qty           | cumulative_ref_ord_sched_qty    | ref_ord_sched_qty           | prior_cumulative_txn_qty          | prior_cumulative_ref_ord_sched_qty |
+      | <ref_txn_qty>                | <cumulative_txn_qty>         | <cumulative_ref_ord_sched_qty>  | <ref_ord_sched_qty>         | <prior_cumulative_txn_qty>        | <prior_cumulative_ref_ord_sched_qty> |
+    When the calculation logic is applied
+    Then the value of apl_qty should be <expected_apl_qty>
+
+    Examples:
+      | ref_txn_qty | cumulative_txn_qty | cumulative_ref_ord_sched_qty | ref_ord_sched_qty | prior_cumulative_txn_qty | prior_cumulative_ref_ord_sched_qty | expected_apl_qty |
+      | 0           | 0                  | 0                            | 0                 | 0                        | 0                                  | NULL            |
+      | -5          | 0                  | 0                            | 2                 | 0                        | 0                                  | NULL            |
+      | 10          | 5                  | 5                            | 2                 | 0                        | 0                                  | NULL            | # Does not meet any condition
+
+  # Validation: Data Type and Nullability
+  Scenario Outline: Validate data types and nullability for all input fields
+    Given a record with
+      | ref_txn_qty                  | cumulative_txn_qty           | cumulative_ref_ord_sched_qty    | ref_ord_sched_qty           | prior_cumulative_txn_qty          | prior_cumulative_ref_ord_sched_qty |
+      | <ref_txn_qty>                | <cumulative_txn_qty>         | <cumulative_ref_ord_sched_qty>  | <ref_ord_sched_qty>         | <prior_cumulative_txn_qty>        | <prior_cumulative_ref_ord_sched_qty> |
+    When the calculation logic is applied
+    Then the system should validate that all fields are of type decimal or NULL
+    And if any field contains an invalid data type, the system should raise an error with message "Invalid data type for field <field_name>"
+
+    Examples:
+      | ref_txn_qty | cumulative_txn_qty | cumulative_ref_ord_sched_qty | ref_ord_sched_qty | prior_cumulative_txn_qty | prior_cumulative_ref_ord_sched_qty |
+      | 10          | 20                 | 30                           | 10                | 5                        | 5                                  |
+      | NULL        | 20                 | 30                           | 10                | 5                        | 5                                  |
+      | 10          | NULL               | 30                           | 10                | 5                        | 5                                  |
+      | 10          | 20                 | NULL                         | 10                | 5                        | 5                                  |
+      | 10          | 20                 | 30                           | NULL              | 5                        | 5                                  |
+      | 10          | 20                 | 30                           | 10                | NULL                     | 5                                  |
+      | 10          | 20                 | 30                           | 10                | 5                        | NULL                               |
+
+  Scenario Outline: Raise error for invalid data type in input fields
+    Given a record with
+      | ref_txn_qty                  | cumulative_txn_qty           | cumulative_ref_ord_sched_qty    | ref_ord_sched_qty           | prior_cumulative_txn_qty          | prior_cumulative_ref_ord_sched_qty |
+      | <ref_txn_qty>                | <cumulative_txn_qty>         | <cumulative_ref_ord_sched_qty>  | <ref_ord_sched_qty>         | <prior_cumulative_txn_qty>        | <prior_cumulative_ref_ord_sched_qty> |
+    When the calculation logic is applied
+    Then the system should raise an error with message "Invalid data type for field <field_name>"
+
+    Examples:
+      | ref_txn_qty | cumulative_txn_qty | cumulative_ref_ord_sched_qty | ref_ord_sched_qty | prior_cumulative_txn_qty | prior_cumulative_ref_ord_sched_qty | field_name                        |
+      | "abc"       | 20                 | 30                           | 10                | 5                        | 5                                  | ref_txn_qty                       |
+      | 10          | "xyz"              | 30                           | 10                | 5                        | 5                                  | cumulative_txn_qty                |
+      | 10          | 20                 | "foo"                        | 10                | 5                        | 5                                  | cumulative_ref_ord_sched_qty      |
+      | 10          | 20                 | 30                           | "bar"             | 5                        | 5                                  | ref_ord_sched_qty                 |
+      | 10          | 20                 | 30                           | 10                | "baz"                    | 5                                  | prior_cumulative_txn_qty          |
+      | 10          | 20                 | 30                           | 10                | 5                        | "qux"                              | prior_cumulative_ref_ord_sched_qty|
+
+  # Validation: Result Table Consistency
+  Scenario: Validate that calculated apl_qty matches expected values in result table
+    Given the table "purgo_playground.f_inv_movmnt_apl_qty_result" contains expected results for each txn_id
+    When the calculation logic is applied to "purgo_playground.f_inv_movmnt_apl_qty"
+    Then for each txn_id, the value of apl_qty should match the value in "purgo_playground.f_inv_movmnt_apl_qty_result"
+
+  # Validation: Test Table Consistency
+  Scenario: Validate that calculated apl_qty matches expected values in test table
+    Given the table "purgo_playground.f_inv_movmnt_apl_qty_test" contains test cases with expected apl_qty for each txn_id
+    When the calculation logic is applied to "purgo_playground.f_inv_movmnt_apl_qty"
+    Then for each txn_id, the value of apl_qty should match the value in "purgo_playground.f_inv_movmnt_apl_qty_test"
+
+  # Validation: Null Handling
+  Scenario Outline: Validate that NULL input values are handled correctly
+    Given a record with
+      | ref_txn_qty                  | cumulative_txn_qty           | cumulative_ref_ord_sched_qty    | ref_ord_sched_qty           | prior_cumulative_txn_qty          | prior_cumulative_ref_ord_sched_qty |
+      | <ref_txn_qty>                | <cumulative_txn_qty>         | <cumulative_ref_ord_sched_qty>  | <ref_ord_sched_qty>         | <prior_cumulative_txn_qty>        | <prior_cumulative_ref_ord_sched_qty> |
+    When the calculation logic is applied
+    Then the value of apl_qty should be NULL
+
+    Examples:
+      | ref_txn_qty | cumulative_txn_qty | cumulative_ref_ord_sched_qty | ref_ord_sched_qty | prior_cumulative_txn_qty | prior_cumulative_ref_ord_sched_qty |
+      | NULL        | 100                | 90                           | 50                | 40                       | 30                                 |
+      | 50          | NULL               | 90                           | 50                | 40                       | 30                                 |
+      | 50          | 100                | NULL                         | 50                | 40                       | 30                                 |
+      | 50          | 100                | 90                           | NULL              | 40                       | 30                                 |
+      | 50          | 100                | 90                           | 50                | NULL                     | 30                                 |
+      | 50          | 100                | 90                           | 50                | 40                       | NULL                               |
