@@ -7,8 +7,8 @@ spark.catalog.setCurrentCatalog("purgo_databricks")
 # Description: This script reads the 'sales_window' table from Unity Catalog, validates and cleans the data,
 # computes Total Sales and Average Sales by Region and Product, calculates sales trends by quarter,
 # identifies top 3 selling products per region, and aggregates all KPIs into a Final_KPI table.
-# All outputs are written as Delta tables in Unity Catalog and displayed for review.
-# The script handles data quality, error scenarios, and enforces correct data types and formats.
+# All outputs are written as Delta tables to Unity Catalog and displayed for review.
+# The script handles data quality, error scenarios, and ensures all outputs conform to required schema and formats.
 
 from pyspark.sql import SparkSession  # SparkSession is already available in Databricks
 from pyspark.sql import functions as F  
