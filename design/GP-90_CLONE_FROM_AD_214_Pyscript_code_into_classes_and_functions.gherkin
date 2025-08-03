@@ -1,0 +1,150 @@
+Feature: Refactor PySpark Sales KPI Pipeline into Reusable Classes and Functions
+
+  The PySpark data processing pipeline for generating sales KPIs must be refactored into reusable classes and functions, following data engineering best practices, without altering the business logic. The pipeline processes data from Unity Catalog tables: purgo_playground.product_data, purgo_playground.product_sales_data, and purgo_playground.product_marketshare_data, and writes results to purgo_playground.sales_kpi.
+
+  Background:
+    Given the Spark session is initialized with appName "GMAAP2_SalesPipeline" and "spark.sql.shuffle.partitions" set to "200"
+    And the following Unity Catalog tables exist:
+      | table_name                                 |
+      | purgo_playground.product_data              |
+      | purgo_playground.product_sales_data        |
+      | purgo_playground.product_marketshare_data  |
+    And the output table is "purgo_playground.sales_kpi" with overwrite mode
+
+  Scenario: Successful pipeline execution with valid data (Happy Path)
+    Given "purgo_playground.product_sales_data" contains rows with non-null sales_amount and valid sales_date in "yyyy-MM-dd" format
+    And "purgo_playground.product_data" contains matching product_id for all sales_product_id in sales data
+    And "purgo_playground.product_marketshare_data" contains matching product_id for all sales_product_id in sales data
+    When the pipeline is executed
+    Then the output table "purgo_playground.sales_kpi" is created with the following columns and types:
+      | column_name              | type    |
+      | sales_year               | int     |
+      | sales_product_id         | string  |
+      | product_name             | string  |
+      | market_segment           | string  |
+      | total_sales              | bigint  |
+      | prev_year_sales          | bigint  |
+      | yoy_growth_pct           | double  |
+      | avg_market_share         | double  |
+      | market_penetration_flag  | string  |
+      | sales_rank               | int     |
+    And each row in "purgo_playground.sales_kpi" satisfies:
+      | Rule                                                                                      |
+      | sales_year is extracted as year from sales_date                                           |
+      | total_sales is the sum of sales_amount for each (sales_product_id, sales_year)            |
+      | prev_year_sales is the total_sales for the previous year for the same sales_product_id     |
+      | yoy_growth_pct is ((total_sales - prev_year_sales) / prev_year_sales) * 100, rounded 2dp  |
+      | avg_market_share is the average of market_share_pct, rounded 2dp                          |
+      | market_penetration_flag is "High" if avg_market_share > 25, "Medium" if 10 <= avg_market_share <= 25, else "Low" |
+      | sales_rank is the rank of total_sales within each sales_year, descending                  |
+
+  Scenario Outline: Data-driven test for market_penetration_flag assignment
+    Given avg_market_share is <avg_market_share>
+    When the pipeline assigns market_penetration_flag
+    Then market_penetration_flag is "<expected_flag>"
+
+    Examples:
+      | avg_market_share | expected_flag |
+      | 30.00            | High          |
+      | 25.00            | Medium        |
+      | 10.00            | Medium        |
+      | 9.99             | Low           |
+      | 0.00             | Low           |
+      | null             | Low           |
+
+  Scenario Outline: Data-driven test for YoY growth calculation
+    Given total_sales for year <year> is <current_sales>
+    And prev_year_sales for year <year> is <prev_sales>
+    When the pipeline calculates yoy_growth_pct
+    Then yoy_growth_pct is <expected_growth>
+
+    Examples:
+      | year | current_sales | prev_sales | expected_growth |
+      | 2022 | 2000         | 1000       | 100.00          |
+      | 2022 | 1000         | 2000       | -50.00          |
+      | 2022 | 0            | 1000       | -100.00         |
+      | 2022 | 1000         | 0          | null            |
+      | 2022 | 1000         | null       | null            |
+
+  Scenario: Handle missing product in product_data (Error Path)
+    Given "purgo_playground.product_sales_data" contains sales_product_id "P999"
+    And "purgo_playground.product_data" does not contain product_id "P999"
+    When the pipeline is executed
+    Then the output row for sales_product_id "P999" has product_name and market_segment as null
+
+  Scenario: Handle missing product in product_marketshare_data (Error Path)
+    Given "purgo_playground.product_sales_data" contains sales_product_id "P888"
+    And "purgo_playground.product_marketshare_data" does not contain product_id "P888"
+    When the pipeline is executed
+    Then the output row for sales_product_id "P888" has avg_market_share as null
+    And market_penetration_flag is "Low"
+
+  Scenario: Ignore sales rows with null sales_amount (Validation Rule)
+    Given "purgo_playground.product_sales_data" contains a row with sales_amount as null
+    When the pipeline is executed
+    Then that row is excluded from all aggregations and the output table
+
+  Scenario: Validate sales_rank assignment per year
+    Given "purgo_playground.product_sales_data" contains multiple products with sales in the same year
+    When the pipeline is executed
+    Then sales_rank is assigned as 1 to the product with highest total_sales in each sales_year
+    And sales_rank increments by 1 for each lower total_sales within the same sales_year
+
+  Scenario: Validate output table overwrite policy
+    Given "purgo_playground.sales_kpi" exists with previous data
+    When the pipeline is executed
+    Then the output table "purgo_playground.sales_kpi" is overwritten with the new results
+
+  Scenario: Validate data types and nullability in output table
+    When the pipeline is executed
+    Then the output table "purgo_playground.sales_kpi" columns have the following nullability:
+      | column_name              | nullable |
+      | sales_year               | true     |
+      | sales_product_id         | true     |
+      | product_name             | true     |
+      | market_segment           | true     |
+      | total_sales              | true     |
+      | prev_year_sales          | true     |
+      | yoy_growth_pct           | true     |
+      | avg_market_share         | true     |
+      | market_penetration_flag  | true     |
+      | sales_rank               | true     |
+
+  Scenario: Validate function and class structure in refactored code
+    When the codebase is refactored
+    Then all data loading, transformation, and writing logic is encapsulated in reusable classes and functions
+    And no business logic is changed from the original script
+    And all function and class names follow Python and data engineering best practices
+
+  Scenario: Handle null or missing data in joins and aggregations
+    Given "purgo_playground.product_data" or "purgo_playground.product_marketshare_data" has null values in join columns
+    When the pipeline is executed
+    Then the output table "purgo_playground.sales_kpi" has nulls in the corresponding output columns for unmatched rows
+    And no error is thrown
+
+  Scenario: Validate Spark/Databricks runtime compatibility
+    Given the pipeline is executed on Databricks runtime version 11.3 or higher
+    When the pipeline is executed
+    Then all PySpark APIs used are compatible with the runtime version
+
+  Scenario: Validate output data for sample input
+    Given the following sample data in "purgo_playground.product_sales_data":
+      | transaction_id | sales_product_id | sales_amount | sales_date  |
+      | T1             | P1               | 1000         | 2022-01-01  |
+      | T2             | P1               | 2000         | 2022-06-01  |
+      | T3             | P2               | 500          | 2022-03-01  |
+      | T4             | P1               | 1500         | 2021-05-01  |
+    And "purgo_playground.product_data":
+      | product_id | product_name | market_segment |
+      | P1         | Widget       | SegmentA       |
+      | P2         | Gadget       | SegmentB       |
+    And "purgo_playground.product_marketshare_data":
+      | product_id | market_share_pct |
+      | P1         | 30.0            |
+      | P2         | 12.0            |
+    When the pipeline is executed
+    Then the output table "purgo_playground.sales_kpi" contains:
+      | sales_year | sales_product_id | product_name | market_segment | total_sales | prev_year_sales | yoy_growth_pct | avg_market_share | market_penetration_flag | sales_rank |
+      | 2021       | P1              | Widget       | SegmentA       | 1500        | null            | null           | 30.00            | High                   | 1          |
+      | 2022       | P1              | Widget       | SegmentA       | 3000        | 1500            | 100.00         | 30.00            | High                   | 1          |
+      | 2022       | P2              | Gadget       | SegmentB       | 500         | null            | null           | 12.00            | Medium                 | 2          |
