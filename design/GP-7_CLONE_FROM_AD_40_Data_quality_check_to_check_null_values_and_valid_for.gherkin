@@ -1,0 +1,107 @@
+Feature: Data Quality Checks on d_product Table Before Production Move
+
+  The system must perform data quality checks on the d_product table in the purgo_databricks Unity Catalog, purgo_playground schema, to ensure no nulls in critical columns and correct date formatting before moving data to production. The checks include:
+  - item_nbr is not null
+  - sellable_qty is not null
+  - prod_exp_dt is in valid yyyymmdd format
+
+  Background:
+    Given the d_product table exists in Unity Catalog "purgo_databricks", schema "purgo_playground"
+    And the table has columns: prod_id (primary key), item_nbr, sellable_qty, prod_exp_dt
+    And prod_exp_dt is stored as a string of length 8
+    And the valid yyyymmdd format requires:
+      | Rule                                      |
+      | 8 digits                                  |
+      | First 4 digits: valid year (e.g., 2023)   |
+      | Next 2 digits: valid month (01-12)        |
+      | Last 2 digits: valid day (01-31, per month)|
+      | Must represent a valid calendar date      |
+
+  Scenario: Count records where item_nbr is null
+    When the data quality check is executed for null item_nbr
+    Then the system returns the count of records where item_nbr is null
+    And the system displays 5 sample records where item_nbr is null, including columns: prod_id, item_nbr, sellable_qty, prod_exp_dt
+
+  Scenario: Count records where sellable_qty is null
+    When the data quality check is executed for null sellable_qty
+    Then the system returns the count of records where sellable_qty is null
+    And the system displays 5 sample records where sellable_qty is null, including columns: prod_id, item_nbr, sellable_qty, prod_exp_dt
+
+  Scenario Outline: Count and sample records where prod_exp_dt is not valid yyyymmdd
+    Given prod_exp_dt value is "<prod_exp_dt_value>"
+    When the data quality check is executed for invalid prod_exp_dt format
+    Then the system returns the count of records where prod_exp_dt is not a valid yyyymmdd date
+    And the system displays 5 sample records where prod_exp_dt is not a valid yyyymmdd date, including columns: prod_id, item_nbr, sellable_qty, prod_exp_dt
+
+    Examples:
+      | prod_exp_dt_value |
+      | 20231301          | # Invalid month
+      | 20230230          | # Invalid day for February
+      | 2023123           | # Not 8 digits
+      | 2023-1201         | # Contains non-digit character
+      | 20231232          | # Day out of range
+
+  Scenario: No records with null item_nbr, sellable_qty, or invalid prod_exp_dt
+    When the data quality check is executed on the d_product table
+    Then the system returns a count of 0 for records with null item_nbr
+    And the system returns a count of 0 for records with null sellable_qty
+    And the system returns a count of 0 for records with invalid prod_exp_dt
+
+  Scenario Outline: Error handling for missing columns
+    Given the d_product table is missing the "<missing_column>" column
+    When the data quality check is executed
+    Then the system returns an error message "Column <missing_column> does not exist in d_product table"
+
+    Examples:
+      | missing_column |
+      | item_nbr       |
+      | sellable_qty   |
+      | prod_exp_dt    |
+
+  Scenario Outline: Error handling for invalid prod_exp_dt data type
+    Given prod_exp_dt column is of type <data_type>
+    When the data quality check for yyyymmdd format is executed
+    Then the system returns an error message "prod_exp_dt column must be of string type for yyyymmdd validation"
+
+    Examples:
+      | data_type |
+      | integer   |
+      | date      |
+      | timestamp |
+
+  Scenario: Error handling for inaccessible d_product table
+    Given the d_product table is not accessible in Unity Catalog "purgo_databricks", schema "purgo_playground"
+    When the data quality check is executed
+    Then the system returns an error message "d_product table not found or access denied in purgo_databricks.purgo_playground"
+
+  Scenario Outline: Validation rules for prod_exp_dt yyyymmdd format
+    Given prod_exp_dt value is "<prod_exp_dt_value>"
+    When the data quality check for yyyymmdd format is executed
+    Then the system validates that:
+      | Rule                                                                                 | Result         |
+      | prod_exp_dt is 8 digits                                                              | <is_8_digits>  |
+      | prod_exp_dt contains only numeric characters                                         | <is_numeric>   |
+      | prod_exp_dt represents a valid calendar date (e.g., not 20230230, not 20231301)      | <is_valid_date>|
+    And if any rule fails, the record is flagged as invalid
+
+    Examples:
+      | prod_exp_dt_value | is_8_digits | is_numeric | is_valid_date |
+      | 20230101          | true        | true       | true          |
+      | 20231301          | true        | true       | false         |
+      | 20230230          | true        | true       | false         |
+      | 2023123           | false       | true       | false         |
+      | 2023-1201         | true        | false      | false         |
+      | 20231232          | true        | true       | false         |
+
+  Scenario: Sample record selection method
+    When the system selects 5 sample records for any data quality failure
+    Then the records are selected by ascending prod_id order
+    And the sample includes columns: prod_id, item_nbr, sellable_qty, prod_exp_dt
+
+  Scenario: Output format for data quality results
+    When the data quality check is executed
+    Then the system outputs:
+      | Output Type         | Description                                                                 |
+      | Count               | Number of records failing each check                                        |
+      | Sample Records      | Up to 5 records per check, with columns: prod_id, item_nbr, sellable_qty, prod_exp_dt |
+      | Error Message       | If applicable, clear error message as specified in error scenarios          |
