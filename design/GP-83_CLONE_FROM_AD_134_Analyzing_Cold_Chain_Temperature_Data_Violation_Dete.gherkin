@@ -1,0 +1,97 @@
+Feature: Cold Chain Temperature Violation Detection and Aggregation
+
+  This feature identifies temperature violations in the cold chain supply, marks each reading as a violation or not, provides a reason for violations, and aggregates data by location for average temperature and violation count. The process ensures compliance with storage requirements and supports detailed analysis.
+
+  Background:
+    Given the input table "purgo_playground.cold_chain_temperature" with columns:
+      | ReadingID | Timestamp (string, ISO 8601) | Temperature (double) | Location (string) |
+    And the output tables:
+      | purgo_playground.cold_chain_temperature_with_violations | columns: ReadingID, Timestamp, Temperature, Location, violation, violation_reason |
+      | purgo_playground.cold_chain_temperature_location_agg    | columns: Location, avg_temperature, violation_count |
+    And the temperature compliance range is minimum 0.0°C and maximum -8.0°C (i.e., valid if -8.0 <= Temperature <= 0.0)
+    And a violation is marked as "yes" if Temperature < -8.0 or Temperature > 0.0, otherwise "no"
+    And the violation_reason is:
+      | "Temperature below minimum threshold" if Temperature < -8.0 |
+      | "Temperature above maximum threshold" if Temperature > 0.0  |
+      | null if no violation                                         |
+
+  Scenario Outline: Mark temperature violations for each reading
+    Given a temperature reading with ReadingID <ReadingID>, Timestamp "<Timestamp>", Temperature <Temperature>, Location "<Location>"
+    When the temperature is evaluated against the compliance range
+    Then the violation field is set to "<violation>"
+    And the violation_reason field is set to "<violation_reason>"
+    And the record is written to "purgo_playground.cold_chain_temperature_with_violations"
+
+    Examples:
+      | ReadingID | Timestamp           | Temperature | Location   | violation | violation_reason                      |
+      | 1         | 2024-06-01T10:00:00 | -7.5        | WarehouseA | no        | null                                  |
+      | 2         | 2024-06-01T11:00:00 | 0.0         | WarehouseA | no        | null                                  |
+      | 3         | 2024-06-01T12:00:00 | -8.0        | WarehouseB | no        | null                                  |
+      | 4         | 2024-06-01T13:00:00 | -8.1        | WarehouseB | yes       | Temperature below minimum threshold   |
+      | 5         | 2024-06-01T14:00:00 | 1.2         | WarehouseC | yes       | Temperature above maximum threshold   |
+      | 6         | 2024-06-01T15:00:00 | -10.0       | WarehouseC | yes       | Temperature below minimum threshold   |
+
+  Scenario: Aggregate temperature data by location
+    Given the "purgo_playground.cold_chain_temperature_with_violations" table is populated
+    When aggregating by Location
+    Then for each Location, calculate avg_temperature as the average of all Temperature values (double, 2 decimal places)
+    And for each Location, calculate violation_count as the count of records where violation = "yes"
+    And write the results to "purgo_playground.cold_chain_temperature_location_agg" with columns: Location, avg_temperature, violation_count
+
+  Scenario Outline: Error handling for invalid temperature values
+    Given a temperature reading with ReadingID <ReadingID>, Timestamp "<Timestamp>", Temperature <Temperature>, Location "<Location>"
+    When the Temperature value is null or not a valid double
+    Then the violation field is set to "yes"
+    And the violation_reason field is set to "Invalid temperature value"
+    And the record is written to "purgo_playground.cold_chain_temperature_with_violations"
+
+    Examples:
+      | ReadingID | Timestamp           | Temperature | Location   |
+      | 7         | 2024-06-01T16:00:00 | null        | WarehouseD |
+      | 8         | 2024-06-01T17:00:00 | "NaN"       | WarehouseE |
+
+  Scenario Outline: Error handling for missing required fields
+    Given a temperature reading with ReadingID <ReadingID>, Timestamp "<Timestamp>", Temperature <Temperature>, Location "<Location>"
+    When any of ReadingID, Timestamp, Temperature, or Location is null
+    Then the violation field is set to "yes"
+    And the violation_reason field is set to "Missing required field(s)"
+    And the record is written to "purgo_playground.cold_chain_temperature_with_violations"
+
+    Examples:
+      | ReadingID | Timestamp           | Temperature | Location   |
+      | null      | 2024-06-01T18:00:00 | -5.0        | WarehouseF |
+      | 9         | null                | -5.0        | WarehouseF |
+      | 10        | 2024-06-01T19:00:00 | -5.0        | null       |
+
+  Scenario: Validate output schema for violations table
+    Given the "purgo_playground.cold_chain_temperature_with_violations" table is created
+    Then the schema must be:
+      | ReadingID (bigint, nullable) |
+      | Timestamp (string, nullable) |
+      | Temperature (double, nullable) |
+      | Location (string, nullable) |
+      | violation (string, nullable) |
+      | violation_reason (string, nullable) |
+
+  Scenario: Validate output schema for location aggregation table
+    Given the "purgo_playground.cold_chain_temperature_location_agg" table is created
+    Then the schema must be:
+      | Location (string, nullable) |
+      | avg_temperature (double, nullable) |
+      | violation_count (bigint, nullable) |
+
+  Scenario: Validate violation field values
+    Given a record in "purgo_playground.cold_chain_temperature_with_violations"
+    When the violation field is populated
+    Then the value must be either "yes" or "no"
+
+  Scenario: Validate violation_reason field values
+    Given a record in "purgo_playground.cold_chain_temperature_with_violations"
+    When the violation field is "no"
+    Then the violation_reason field must be null
+    When the violation field is "yes"
+    Then the violation_reason field must be one of:
+      | "Temperature below minimum threshold" |
+      | "Temperature above maximum threshold" |
+      | "Invalid temperature value"           |
+      | "Missing required field(s)"           |
