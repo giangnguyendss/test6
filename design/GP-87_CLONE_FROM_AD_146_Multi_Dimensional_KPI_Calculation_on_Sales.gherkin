@@ -1,120 +1,102 @@
-Feature: Advanced Sales Performance Analysis using PySpark on sales_window Table
+Feature: Advanced Sales Performance KPI Calculation and Analysis
 
-  This feature calculates advanced KPIs including Total Sales, Sales Trends, and Final KPI aggregations
-  across multiple dimensions (Region, Product, Quarter) using the source table 'sales_window' in Unity Catalog
-  (purgo_databricks.purgo_playground.sales_window). The outputs are: Total_Sales, Sales_Trends, and Final_KPI.
+  This feature calculates advanced sales KPIs including Total Sales, Average Sales, Sales Trends, and aggregates them into a Final KPI output using the 'purgo_playground.sales_window' table in Unity Catalog. The results are displayed as separate outputs for Total_Sales, Sales_Trends, and Final_KPI.
 
   Background:
-    Given the source table "purgo_databricks.purgo_playground.sales_window" exists
-    And the table contains columns: Sale_ID (string), Region (string), Product (string), Sales_Amount (decimal), Sale_Date (date)
-    And the "Sale_Date" column is used to determine the quarter in format "YYYY-QN" (e.g., 2024-Q1)
-    And all sales are included (no filters on status or returns)
-    And the analysis covers all available data in the table
+    Given the source table "purgo_playground.sales_window" exists in Unity Catalog schema "purgo_playground"
+    And the table has columns: Sales_ID (bigint), Product (string), Region (string), Year (bigint), Quarter (bigint), Sales_Amount (bigint)
+    And all calculations are performed using PySpark DataFrame APIs
+    And null values in Sales_Amount, Year, Quarter, Product, or Region are excluded from all aggregations
+    And all outputs are displayed as DataFrames and not written back to Unity Catalog
 
   # Total_Sales Calculation
-  Scenario: Calculate Total and Average Sales Amount by Region and Product
-    When the user groups sales data by "Region" and "Product"
-    And calculates the sum of "Sales_Amount" as "Total_Sales_Amount"
-    And calculates the average of "Sales_Amount" as "Average_Sales_Amount"
-    Then the output table "Total_Sales" contains columns: Region, Product, Total_Sales_Amount (decimal), Average_Sales_Amount (decimal)
-    And all numeric values are rounded to 2 decimal places
+  Scenario: Calculate Total and Average Sales_Amount by Region and Product
+    Given the sales_window table contains valid data for Region, Product, and Sales_Amount
+    When the user groups the data by Region and Product
+    And calculates the sum of Sales_Amount as Total_Sales_Amount
+    And calculates the average of Sales_Amount as Average_Sales_Amount (rounded to 2 decimal places)
+    Then the output DataFrame "Total_Sales" contains columns: Region, Product, Total_Sales_Amount (bigint), Average_Sales_Amount (double)
+    And all rows have non-null values for Region, Product, Total_Sales_Amount, and Average_Sales_Amount
+
+  Scenario: Handle missing or null values in Sales_Amount, Region, or Product for Total_Sales
+    Given the sales_window table contains rows with null values in Sales_Amount, Region, or Product
+    When the user performs the Total_Sales calculation
+    Then those rows are excluded from the aggregation
+    And the output does not contain any nulls in Region, Product, Total_Sales_Amount, or Average_Sales_Amount
 
   # Sales_Trends Calculation
-  Scenario: Calculate Sales Trends by Region, Product, and Quarter
-    When the user groups sales data by "Region", "Product", and "Quarter" (derived from "Sale_Date")
-    And orders the data by "Region", "Product", and "Quarter" ascending
-    And calculates the sum of "Sales_Amount" as "Sales_Amount" for each group
-    And calculates "Previous_Sales_Amount" as the "Sales_Amount" of the previous quarter for the same Region and Product (null for first quarter)
-    And calculates "Sales_Change" as "Sales_Amount" minus "Previous_Sales_Amount" (null if "Previous_Sales_Amount" is null)
-    Then the output table "Sales_Trends" contains columns: Region, Product, Quarter, Sales_Amount (decimal), Previous_Sales_Amount (decimal), Sales_Change (decimal)
-    And all numeric values are rounded to 2 decimal places
+  Scenario: Calculate Sales Trends by Region, Product, Year, and Quarter
+    Given the sales_window table contains valid data for Region, Product, Year, Quarter, and Sales_Amount
+    When the user groups the data by Region, Product, Year, and Quarter
+    And orders the data by Region, Product, Year ascending, Quarter ascending
+    And calculates Previous_Sales_Amount as the Sales_Amount of the previous quarter for the same Region and Product (using lag window function)
+    And calculates Sales_Change as Sales_Amount - Previous_Sales_Amount
+    Then the output DataFrame "Sales_Trends" contains columns: Region, Product, Year, Quarter, Sales_Amount, Previous_Sales_Amount, Sales_Change
+    And Previous_Sales_Amount is null for the first quarter of each Region and Product
+    And Sales_Change is null for the first quarter of each Region and Product
 
-  # Top_Selling_Products Calculation
-  Scenario Outline: Identify Top N Selling Products by Total Sales Amount per Region
-    When the user groups sales data by "Region" and "Product"
-    And calculates the sum of "Sales_Amount" as "Total_Sales_Amount"
-    And ranks products within each Region by "Total_Sales_Amount" in descending order
-    And selects the top <N> products per Region
-    Then the output table "Top_Selling_Products" contains columns: Region, Product, Total_Sales_Amount (decimal), Product_Rank (integer)
-    And all numeric values are rounded to 2 decimal places
+  Scenario: Handle missing or null values in Sales_Amount, Year, or Quarter for Sales_Trends
+    Given the sales_window table contains rows with null values in Sales_Amount, Year, or Quarter
+    When the user performs the Sales_Trends calculation
+    Then those rows are excluded from the trend calculation
+    And the output does not contain any nulls in Region, Product, Year, Quarter, or Sales_Amount except for Previous_Sales_Amount and Sales_Change as defined
+
+  # Top_Selling_Products Calculation (Assumption: Top 3 products by Total_Sales_Amount per Region)
+  Scenario Outline: Identify Top Selling Products by Region
+    Given the Total_Sales DataFrame is available
+    When the user ranks products within each Region by Total_Sales_Amount in descending order
+    And selects the top 3 products per Region
+    Then the output DataFrame "Top_Selling_Products" contains columns: Region, Product, Total_Sales_Amount, Product_Rank
+    And Product_Rank is an integer from 1 to 3 for each Region
 
     Examples:
-      | N  |
-      | 3  |
-      | 5  |
+      | Region   | Product   | Total_Sales_Amount | Product_Rank |
+      | North    | WidgetA   | 100000             | 1            |
+      | North    | WidgetB   | 90000              | 2            |
+      | North    | WidgetC   | 85000              | 3            |
+      | South    | WidgetD   | 120000             | 1            |
+      | South    | WidgetE   | 110000             | 2            |
+      | South    | WidgetF   | 105000             | 3            |
+
+  Scenario: Handle ties in Total_Sales_Amount for Top_Selling_Products
+    Given two or more products in the same Region have the same Total_Sales_Amount
+    When ranking products for Top_Selling_Products
+    Then assign the same Product_Rank to tied products
+    And skip subsequent ranks as per standard ranking (dense_rank or rank as per implementation)
 
   # Final_KPI Aggregation
-  Scenario: Aggregate and Join KPI Results into Final_KPI Table
-    Given the "Total_Sales" table is available
-    And the "Top_Selling_Products" table is available for N=3
-    And the "Sales_Trends" table is available
-    When the user joins "Total_Sales" and "Top_Selling_Products" on Region and Product
-    And joins the result with "Sales_Trends" on Region and Product
-    Then the output table "Final_KPI" contains columns:
-      | Region | Product | Total_Sales_Amount | Average_Sales_Amount | Product_Rank | Quarter | Sales_Amount | Previous_Sales_Amount | Sales_Change |
-    And all numeric values are rounded to 2 decimal places
-    And only products present in "Top_Selling_Products" (N=3) are included
+  Scenario: Aggregate Total_Sales, Top_Selling_Products, and Sales_Trends into Final_KPI
+    Given the DataFrames "Total_Sales", "Top_Selling_Products", and "Sales_Trends" are available
+    When the user joins these DataFrames on Region and Product
+    And includes all columns from Total_Sales, Top_Selling_Products, and Sales_Trends
+    Then the output DataFrame "Final_KPI" contains columns: Region, Product, Total_Sales_Amount, Average_Sales_Amount, Product_Rank, Year, Quarter, Sales_Amount, Previous_Sales_Amount, Sales_Change
+    And only products present in Top_Selling_Products are included in Final_KPI
+
+  Scenario: Handle missing join keys in Final_KPI aggregation
+    Given a product is present in Total_Sales or Sales_Trends but not in Top_Selling_Products for a Region
+    When performing the join for Final_KPI
+    Then that product is excluded from the Final_KPI output for that Region
 
   # Output Validation
-  Scenario: Validate Output Data Types and Formats
-    Then all "Total_Sales_Amount", "Average_Sales_Amount", "Sales_Amount", "Previous_Sales_Amount", and "Sales_Change" columns are decimal(18,2)
-    And "Product_Rank" is integer
-    And "Quarter" is in format "YYYY-QN" (e.g., 2024-Q1)
-    And "Region" and "Product" are string
+  Scenario: Display all outputs as DataFrames
+    Given the calculations for Total_Sales, Sales_Trends, and Final_KPI are complete
+    When the user displays the results
+    Then the outputs are shown as DataFrames in the Databricks notebook or PySpark environment
+    And no data is written back to Unity Catalog tables
 
   # Error Scenarios
-  Scenario: Handle Missing or Null Sales_Amount Values
-    Given there are rows in "sales_window" with null "Sales_Amount"
-    When calculating any aggregate or trend
-    Then null "Sales_Amount" values are excluded from all calculations
-    And if all "Sales_Amount" values for a group are null, the output for that group is null
+  Scenario: Handle empty or missing sales_window table
+    Given the sales_window table does not exist or is empty
+    When the user attempts to perform any calculation
+    Then an error is raised with message "Source table purgo_playground.sales_window does not exist or contains no data"
 
-  Scenario: Handle Missing Sale_Date Values
-    Given there are rows in "sales_window" with null "Sale_Date"
-    When deriving "Quarter" or grouping by quarter
-    Then such rows are excluded from "Sales_Trends" and "Final_KPI" outputs
-    And an error message "Sale_Date is required for trend analysis" is logged
+  Scenario: Handle invalid data types in Sales_Amount, Year, or Quarter
+    Given the sales_window table contains non-numeric values in Sales_Amount, Year, or Quarter
+    When the user attempts to perform aggregations or calculations
+    Then an error is raised with message "Invalid data type detected in Sales_Amount, Year, or Quarter columns"
 
-  Scenario: Handle Empty Source Table
-    Given the "sales_window" table is empty
-    When running any calculation
-    Then all output tables ("Total_Sales", "Sales_Trends", "Top_Selling_Products", "Final_KPI") are empty
-    And a warning message "No sales data available for analysis" is logged
-
-  # Output Delivery
-  Scenario: Store Output Tables in Unity Catalog
-    When the output tables are generated
-    Then "Total_Sales" is stored as "purgo_databricks.purgo_playground.total_sales"
-    And "Sales_Trends" is stored as "purgo_databricks.purgo_playground.sales_trends"
-    And "Top_Selling_Products" is stored as "purgo_databricks.purgo_playground.top_selling_products"
-    And "Final_KPI" is stored as "purgo_databricks.purgo_playground.final_kpi"
-    And all tables are in Delta format
-
-  # Data-Driven Validation for Sales Trends
-  Scenario Outline: Validate Sales_Change Calculation for Specific Data Points
-    Given the following sales data:
-      | Region   | Product   | Quarter   | Sales_Amount |
-      | <Region> | <Product> | <Q1>      | <SA1>        |
-      | <Region> | <Product> | <Q2>      | <SA2>        |
-    When calculating "Sales_Trends"
-    Then for <Q2>, "Previous_Sales_Amount" is <SA1>
-    And "Sales_Change" is <SA2> - <SA1>
-
-    Examples:
-      | Region | Product | Q1      | SA1   | Q2      | SA2   |
-      | East   | Widget  | 2024-Q1 | 100.0 | 2024-Q2 | 150.0 |
-      | West   | Gadget  | 2024-Q2 | 200.0 | 2024-Q3 | 180.0 |
-
-  # Validation Rules
-  Scenario: Enforce Validation Rules on Input Data
-    When reading from "sales_window"
-    Then "Sales_Amount" must be a non-negative decimal
-    And "Sale_Date" must be a valid date
-    And rows failing validation are excluded from all outputs
-    And an error message is logged for each excluded row
-
-  # Acceptance Criteria
-  Scenario: Acceptance Criteria for Advanced Sales Performance Analysis
-    Then all calculations and outputs must match the requirements for Total_Sales, Sales_Trends, Top_Selling_Products, and Final_KPI
-    And all error and validation scenarios are handled as specified
-    And all outputs are stored in Unity Catalog as Delta tables with correct schema and data types
+  Scenario: Handle nulls in join keys during Final_KPI aggregation
+    Given any of Region or Product is null in the input DataFrames
+    When performing the join for Final_KPI
+    Then those rows are excluded from the output
+    And a warning is logged: "Null values in join keys (Region, Product) excluded from Final_KPI aggregation"
