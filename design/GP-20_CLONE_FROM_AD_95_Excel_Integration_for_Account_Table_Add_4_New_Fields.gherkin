@@ -1,0 +1,102 @@
+Feature: Create and update the 'Account' table in purgo_playground schema to include patient-related details for centralized account information management
+
+  Background:
+    Given the Unity Catalog is 'purgo_databricks'
+    And the schema is 'purgo_playground'
+    And the table name is 'Account'
+    And the following columns and datatypes are defined for initial creation:
+      | Column Name                        | Datatype | Length | Nullable | Default | Constraint         |
+      | Organization_Corporate_Parent__c   | STRING   | 255    | YES      | NULL    |                   |
+      | Organization_Level__c              | STRING   | 255    | YES      | NULL    |                   |
+      | Address__c                         | STRING   | 255    | YES      | NULL    |                   |
+      | Health_Industry_Number__c          | STRING   | 255    | YES      | NULL    |                   |
+      | Class_of_Trade_Facility_Type__c    | STRING   | 255    | YES      | NULL    |                   |
+      | Classification_type__c             | STRING   | 255    | YES      | NULL    |                   |
+      | Classification_sub_type__c         | STRING   | 255    | YES      | NULL    |                   |
+      | Contracted_340B__c                 | BOOLEAN  |        | YES      | NULL    |                   |
+    And the following 4 new columns are to be added:
+      | Column Name                  | Datatype | Length | Nullable | Default | Constraint |
+      | Operational_Status           | STRING   | 255    | YES      | NULL    |            |
+      | Provider_Network_Type        | STRING   | 255    | YES      | NULL    |            |
+      | Regulatory_Compliance_Code   | STRING   | 255    | YES      | NULL    |            |
+      | Tax_Identification_Number    | STRING   | 255    | YES      | NULL    |            |
+
+  Scenario: Drop the 'Account' table if it already exists
+    Given the 'Account' table may already exist in 'purgo_playground' schema
+    When the Databricks SQL is executed to drop the table if it exists
+    Then the table 'purgo_playground.Account' should not exist prior to creation
+
+  Scenario: Create the 'Account' table with specified columns and datatypes
+    Given the 'Account' table does not exist in 'purgo_playground' schema
+    When the Databricks SQL is executed to create the table with the following columns:
+      | Organization_Corporate_Parent__c   | STRING(255) |
+      | Organization_Level__c              | STRING(255) |
+      | Address__c                         | STRING(255) |
+      | Health_Industry_Number__c          | STRING(255) |
+      | Class_of_Trade_Facility_Type__c    | STRING(255) |
+      | Classification_type__c             | STRING(255) |
+      | Classification_sub_type__c         | STRING(255) |
+      | Contracted_340B__c                 | BOOLEAN     |
+    Then the table 'purgo_playground.Account' should be created with the specified columns and datatypes
+    And all columns should be nullable
+    And no primary key or unique constraints should be defined
+
+  Scenario: Add 4 new columns to the 'Account' table from patient_addition_field.xlsx
+    Given the 'Account' table exists in 'purgo_playground' schema
+    When the Databricks SQL is executed to alter the table and add the following columns:
+      | Operational_Status           | STRING(255) |
+      | Provider_Network_Type        | STRING(255) |
+      | Regulatory_Compliance_Code   | STRING(255) |
+      | Tax_Identification_Number    | STRING(255) |
+    Then the table 'purgo_playground.Account' should include the 4 new columns with datatype STRING(255)
+    And all new columns should be nullable
+    And no default values should be set for the new columns
+
+  Scenario Outline: Validate column creation and alteration with specific data types and nullability
+    Given the 'Account' table is created or altered
+    When the column '<Column Name>' is checked in the table schema
+    Then the column datatype should be '<Datatype>'
+    And the column length should be <Length>
+    And the column should be nullable
+
+    Examples:
+      | Column Name                      | Datatype | Length |
+      | Organization_Corporate_Parent__c | STRING   | 255    |
+      | Organization_Level__c            | STRING   | 255    |
+      | Address__c                       | STRING   | 255    |
+      | Health_Industry_Number__c        | STRING   | 255    |
+      | Class_of_Trade_Facility_Type__c  | STRING   | 255    |
+      | Classification_type__c           | STRING   | 255    |
+      | Classification_sub_type__c       | STRING   | 255    |
+      | Contracted_340B__c               | BOOLEAN  |        |
+      | Operational_Status               | STRING   | 255    |
+      | Provider_Network_Type            | STRING   | 255    |
+      | Regulatory_Compliance_Code       | STRING   | 255    |
+      | Tax_Identification_Number        | STRING   | 255    |
+
+  Scenario: Error when attempting to add a column that already exists
+    Given the 'Account' table already contains the column 'Operational_Status'
+    When the Databricks SQL is executed to add the column 'Operational_Status' again
+    Then an error should be raised with message "Column 'Operational_Status' already exists in table 'purgo_playground.Account'"
+
+  Scenario: Error when creating the table with missing required column definitions
+    Given the Databricks SQL to create the 'Account' table is missing the column 'Organization_Corporate_Parent__c'
+    When the SQL is executed
+    Then an error should be raised with message "Column 'Organization_Corporate_Parent__c' is required for table 'purgo_playground.Account'"
+
+  Scenario: Error when specifying an invalid datatype or length
+    Given the Databricks SQL to create or alter the 'Account' table specifies datatype 'STRNG' for column 'Operational_Status'
+    When the SQL is executed
+    Then an error should be raised with message "Invalid data type 'STRNG' for column 'Operational_Status' in table 'purgo_playground.Account'"
+
+  Scenario: Validate that all columns are nullable and have no default values
+    Given the 'Account' table is created or altered as specified
+    When the table schema is inspected
+    Then all columns should allow NULL values
+    And no columns should have default values set
+
+  Scenario: Validate table is created in the correct schema and catalog
+    Given the Databricks SQL is executed to create or alter the 'Account' table
+    When the table metadata is queried
+    Then the table should exist in schema 'purgo_playground'
+    And the table should exist in catalog 'purgo_databricks'
