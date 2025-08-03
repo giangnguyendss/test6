@@ -1,0 +1,192 @@
+Feature: SQL-based logic for d_comp table mapping and population
+
+  The d_comp table must be populated using data from PSEK, PARA, and PCHK tables according to the provided mapping rules. Only columns where "Mandatory for mapping" and "Need Mapping" are both "YES" are to be mapped; all other columns must be set to null. The process must ensure data integrity, correct joins, and proper handling of missing or unmatched data.
+
+  Background:
+    Given the source tables purgo_playground.psek, purgo_playground.para, and purgo_playground.pchk exist in Unity Catalog purgo_databricks
+    And the target table purgo_playground.d_comp exists with the following schema:
+      | Field            | DataType   | Nullable | Description                                 |
+      |------------------|------------|----------|---------------------------------------------|
+      | src_sys_cd       | string     | NO       | Source System Code (hardcoded 'FBW')        |
+      | co_cd            | string     | NO       | Company Code (from PSEK.PKLNR)              |
+      | co_nm            | string     | NO       | Company Name (from PSEK.tgort)              |
+      | st_cd            | string     | YES      | State Province Code (null)                  |
+      | st_nm            | string     | YES      | State Province Name (null)                  |
+      | rgn_cd           | string     | YES      | Region Code (null)                          |
+      | rgn_nm           | string     | YES      | Region Name (null)                          |
+      | cntry_cd         | string     | NO       | Company Country Code (from PARA.PTART)      |
+      | cntry_nm         | string     | NO       | Company Country Name (from PSEK.dwart)      |
+      | source_country   | string     | NO       | Source Country (hardcoded 'NA')             |
+      | crt_dt           | timestamp  | NO       | Record create timestamp (current_timestamp)  |
+    And only records from PSEK where PSEK.tgort = 'FIN' are considered
+    And joins are performed as follows:
+      | Join Order | Join Type | Left Table | Right Table | Join Condition                                                                 |
+      |------------|-----------|------------|-------------|--------------------------------------------------------------------------------|
+      | 1          | LEFT      | PSEK       | PCHK        | TRIM(PSEK.tanpt) = TRIM(PCHK.tanpt) AND PSEK.PKLNR = PCHK.ckarg                |
+      | 2          | LEFT      | PCHK       | PARA        | TRIM(PCHK.tanpt) = TRIM(PARA.tanpt) AND TRIM(PCHK.patnr) = TRIM(PARA.patnr)    |
+    And for all joins, leading and trailing spaces in join keys are trimmed
+    And if a source value is missing for a mapped field, the target field is set to null
+    And the primary key for d_comp is (src_sys_cd, co_cd)
+    And duplicate records (same src_sys_cd, co_cd) are not allowed in d_comp
+
+  Scenario: Successful population of d_comp with all required mappings (happy path)
+    Given PSEK contains a record with
+      | tanpt  | pklnr  | tgort | dwart    |
+      | "A001" | "C100" | "FIN" | "USA"    |
+    And PCHK contains a record with
+      | tanpt  | ckarg  | patnr  |
+      | "A001" | "C100" | "P200" |
+    And PARA contains a record with
+      | tanpt  | patnr  | ptart  |
+      | "A001" | "P200" | "US"   |
+    When the SQL mapping logic is executed
+    Then d_comp contains a record with
+      | src_sys_cd | co_cd | co_nm | st_cd | st_nm | rgn_cd | rgn_nm | cntry_cd | cntry_nm | source_country | crt_dt           |
+      | "FBW"      | "C100"| "FIN" | null  | null  | null   | null   | "US"     | "USA"    | "NA"           | <current_timestamp> |
+
+  Scenario: Source record missing in PARA (cntry_cd mapping)
+    Given PSEK contains a record with
+      | tanpt  | pklnr  | tgort | dwart    |
+      | "A002" | "C101" | "FIN" | "CAN"    |
+    And PCHK contains a record with
+      | tanpt  | ckarg  | patnr  |
+      | "A002" | "C101" | "P201" |
+    And PARA does not contain a record with tanpt = "A002" and patnr = "P201"
+    When the SQL mapping logic is executed
+    Then d_comp contains a record with
+      | src_sys_cd | co_cd | co_nm | st_cd | st_nm | rgn_cd | rgn_nm | cntry_cd | cntry_nm | source_country | crt_dt           |
+      | "FBW"      | "C101"| "FIN" | null  | null  | null   | null   | null     | "CAN"    | "NA"           | <current_timestamp> |
+
+  Scenario: Source record missing in PCHK (join to PARA fails)
+    Given PSEK contains a record with
+      | tanpt  | pklnr  | tgort | dwart    |
+      | "A003" | "C102" | "FIN" | "MEX"    |
+    And PCHK does not contain a record with tanpt = "A003" and ckarg = "C102"
+    When the SQL mapping logic is executed
+    Then d_comp contains a record with
+      | src_sys_cd | co_cd | co_nm | st_cd | st_nm | rgn_cd | rgn_nm | cntry_cd | cntry_nm | source_country | crt_dt           |
+      | "FBW"      | "C102"| "FIN" | null  | null  | null   | null   | null     | "MEX"    | "NA"           | <current_timestamp> |
+
+  Scenario: PSEK.tgort is not 'FIN' (filter applied)
+    Given PSEK contains a record with
+      | tanpt  | pklnr  | tgort | dwart    |
+      | "A004" | "C103" | "HR"  | "BRA"    |
+    And PCHK contains a record with
+      | tanpt  | ckarg  | patnr  |
+      | "A004" | "C103" | "P202" |
+    And PARA contains a record with
+      | tanpt  | patnr  | ptart  |
+      | "A004" | "P202" | "BR"   |
+    When the SQL mapping logic is executed
+    Then d_comp does not contain a record with co_cd = "C103"
+
+  Scenario: Duplicate records in PSEK for same PKLNR (deduplication)
+    Given PSEK contains records
+      | tanpt  | pklnr  | tgort | dwart    |
+      | "A005" | "C104" | "FIN" | "DEU"    |
+      | "A005" | "C104" | "FIN" | "DEU"    |
+    And PCHK contains a record with
+      | tanpt  | ckarg  | patnr  |
+      | "A005" | "C104" | "P203" |
+    And PARA contains a record with
+      | tanpt  | patnr  | ptart  |
+      | "A005" | "P203" | "DE"   |
+    When the SQL mapping logic is executed
+    Then d_comp contains only one record with
+      | src_sys_cd | co_cd | co_nm | st_cd | st_nm | rgn_cd | rgn_nm | cntry_cd | cntry_nm | source_country | crt_dt           |
+      | "FBW"      | "C104"| "FIN" | null  | null  | null   | null   | "DE"     | "DEU"    | "NA"           | <current_timestamp> |
+
+  Scenario Outline: Data-driven mapping for multiple companies
+    Given PSEK contains a record with
+      | tanpt  | pklnr  | tgort | dwart    |
+      | <tanpt>| <pklnr>| "FIN" | <dwart>  |
+    And PCHK contains a record with
+      | tanpt  | ckarg  | patnr  |
+      | <tanpt>| <pklnr>| <patnr>|
+    And PARA contains a record with
+      | tanpt  | patnr  | ptart  |
+      | <tanpt>| <patnr>| <ptart>|
+    When the SQL mapping logic is executed
+    Then d_comp contains a record with
+      | src_sys_cd | co_cd  | co_nm | st_cd | st_nm | rgn_cd | rgn_nm | cntry_cd | cntry_nm | source_country | crt_dt           |
+      | "FBW"      | <pklnr>| "FIN" | null  | null  | null   | null   | <ptart>  | <dwart>  | "NA"           | <current_timestamp> |
+
+    Examples:
+      | tanpt  | pklnr  | patnr  | ptart | dwart    |
+      | "A006" | "C105" | "P204" | "FR"  | "FRA"    |
+      | "A007" | "C106" | "P205" | "IT"  | "ITA"    |
+      | "A008" | "C107" | "P206" | "ES"  | "ESP"    |
+
+  Scenario: All non-mandatory and non-mapped columns are set to null
+    Given PSEK contains a record with
+      | tanpt  | pklnr  | tgort | dwart    |
+      | "A009" | "C108" | "FIN" | "GBR"    |
+    And PCHK contains a record with
+      | tanpt  | ckarg  | patnr  |
+      | "A009" | "C108" | "P207" |
+    And PARA contains a record with
+      | tanpt  | patnr  | ptart  |
+      | "A009" | "P207" | "GB"   |
+    When the SQL mapping logic is executed
+    Then d_comp contains a record with
+      | src_sys_cd | co_cd | co_nm | st_cd | st_nm | rgn_cd | rgn_nm | cntry_cd | cntry_nm | source_country | crt_dt           |
+      | "FBW"      | "C108"| "FIN" | null  | null  | null   | null   | "GB"     | "GBR"    | "NA"           | <current_timestamp> |
+
+  Scenario: Error when attempting to insert duplicate (src_sys_cd, co_cd) into d_comp
+    Given d_comp already contains a record with
+      | src_sys_cd | co_cd |
+      | "FBW"      | "C109"|
+    And PSEK contains a record with
+      | tanpt  | pklnr  | tgort | dwart    |
+      | "A010" | "C109" | "FIN" | "JPN"    |
+    And PCHK contains a record with
+      | tanpt  | ckarg  | patnr  |
+      | "A010" | "C109" | "P208" |
+    And PARA contains a record with
+      | tanpt  | patnr  | ptart  |
+      | "A010" | "P208" | "JP"   |
+    When the SQL mapping logic is executed
+    Then an error is raised with message "Duplicate entry for primary key (src_sys_cd, co_cd) in d_comp"
+
+  Scenario: Error when required source field is missing in PSEK
+    Given PSEK contains a record with
+      | tanpt  | pklnr  | tgort | dwart    |
+      | "A011" | null   | "FIN" | "AUS"    |
+    And PCHK contains a record with
+      | tanpt  | ckarg  | patnr  |
+      | "A011" | null   | "P209" |
+    And PARA contains a record with
+      | tanpt  | patnr  | ptart  |
+      | "A011" | "P209" | "AU"   |
+    When the SQL mapping logic is executed
+    Then d_comp contains a record with
+      | src_sys_cd | co_cd | co_nm | st_cd | st_nm | rgn_cd | rgn_nm | cntry_cd | cntry_nm | source_country | crt_dt           |
+      | "FBW"      | null  | "FIN" | null  | null  | null   | null   | "AU"     | "AUS"    | "NA"           | <current_timestamp> |
+
+  Scenario: Error when attempting to insert null into non-nullable field
+    Given PSEK contains a record with
+      | tanpt  | pklnr  | tgort | dwart    |
+      | "A012" | "C110" | "FIN" | null     |
+    And PCHK contains a record with
+      | tanpt  | ckarg  | patnr  |
+      | "A012" | "C110" | "P210" |
+    And PARA contains a record with
+      | tanpt  | patnr  | ptart  |
+      | "A012" | "P210" | "NZ"   |
+    When the SQL mapping logic is executed
+    Then an error is raised with message "Null value for non-nullable field cntry_nm in d_comp"
+
+  Scenario: All mapped fields are trimmed of leading/trailing spaces
+    Given PSEK contains a record with
+      | tanpt   | pklnr   | tgort | dwart     |
+      | " A013" | "C111 " | "FIN" | " IND "   |
+    And PCHK contains a record with
+      | tanpt   | ckarg   | patnr   |
+      | " A013" | "C111 " | "P211 " |
+    And PARA contains a record with
+      | tanpt   | patnr   | ptart   |
+      | " A013" | "P211 " | "IN "   |
+    When the SQL mapping logic is executed
+    Then d_comp contains a record with
+      | src_sys_cd | co_cd | co_nm | st_cd | st_nm | rgn_cd | rgn_nm | cntry_cd | cntry_nm | source_country | crt_dt           |
+      | "FBW"      | "C111"| "FIN" | null  | null  | null   | null   | "IN"     | "IND"    | "NA"           | <current_timestamp> |
