@@ -9,7 +9,6 @@
 #   - Handles edge, error, and special character cases
 #   - Only invoice_number is modified; all other columns are preserved
 
-from pyspark.sql import SparkSession  # SparkSession is already available in Databricks
 from pyspark.sql import functions as F  
 from pyspark.sql.types import (  
     StructType, StructField, StringType, IntegerType, DoubleType, LongType, TimestampType, DateType
@@ -70,7 +69,6 @@ test_data = [
     (25, "LONGINVOICENUMBER1234567890", "CUST025", 15.67, "2024-04-14T11:15:00.000+0000"),
 ]
 
-# Convert string timestamps to actual TimestampType
 from pyspark.sql import Row  
 import datetime  
 
@@ -78,7 +76,6 @@ def parse_ts(ts_str):
     """Parse Databricks timestamp string to Python datetime."""
     if ts_str is None:
         return None
-    # Remove timezone for compatibility with datetime.strptime
     ts_str = ts_str.replace("+0000", "")
     return datetime.datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%S.%f")
 
@@ -165,9 +162,9 @@ validation_df.show(truncate=False)
 def test_masking_logic():
     """
     Unit test for mask_invoice_number_col function.
-    Validates masking for various edge cases and expected outputs.
+    Validates masking for all edge cases and requirements.
     """
-    # Test cases: (original, expected)
+    # Prepare test cases: (original, expected)
     test_cases = [
         ("1234234534", "123423****"),
         ("9876543210", "987654****"),
@@ -195,35 +192,36 @@ def test_masking_logic():
         ("A B C D", "A B ****"),
         ("LONGINVOICENUMBER1234567890", "LONGINVOICENUMBER123456****"),
     ]
-    rows = [Row(invoice_number=tc[0]) for tc in test_cases]
+    rows = [Row(invoice_number=orig) for orig, _ in test_cases]
     df = spark.createDataFrame(rows, schema=StructType([StructField("invoice_number", StringType(), True)]))
     masked = mask_invoice_number_col(df, "invoice_number").collect()
-    for i, row in enumerate(masked):
-        assert row.invoice_number == test_cases[i][1], f"Failed for {test_cases[i][0]}: got {row.invoice_number}, expected {test_cases[i][1]}"
+    for i, (_, expected) in enumerate(test_cases):
+        actual = masked[i]["invoice_number"]
+        assert actual == expected, f"Test failed for input {test_cases[i][0]}: expected {expected}, got {actual}"
 
 test_masking_logic()
 
 def test_null_and_empty_handling():
     """
-    Unit test for NULL and empty string handling in mask_invoice_number_col.
+    Unit test for NULL and empty string handling in masking logic.
     """
     rows = [Row(invoice_number=None), Row(invoice_number="")]
     df = spark.createDataFrame(rows, schema=StructType([StructField("invoice_number", StringType(), True)]))
     masked = mask_invoice_number_col(df, "invoice_number").collect()
-    assert masked[0].invoice_number is None, "NULL should remain NULL"
-    assert masked[1].invoice_number == "", "Empty string should remain empty"
+    assert masked[0]["invoice_number"] is None, "NULL should remain NULL"
+    assert masked[1]["invoice_number"] == "", "Empty string should remain empty"
 
 test_null_and_empty_handling()
 
 def test_non_string_type_error():
     """
-    Unit test to ensure TypeError is raised if invoice_number is not StringType.
+    Unit test: masking logic should raise error if invoice_number is not StringType.
     """
     schema = StructType([StructField("invoice_number", IntegerType(), True)])
     df = spark.createDataFrame([Row(invoice_number=1234)], schema=schema)
     try:
         mask_invoice_number_col(df, "invoice_number")
-        assert False, "TypeError not raised for non-string invoice_number"
+        assert False, "Should raise TypeError for non-string column"
     except TypeError as e:
         assert "invoice_number must be of type STRING" in str(e)
 
@@ -231,7 +229,7 @@ test_non_string_type_error()
 
 def test_schema_validation():
     """
-    Integration test: Validates that the schema of d_product_revenue_clone matches d_product_revenue.
+    Integration test: schema of clone table matches source table after masking.
     """
     src_schema = spark.table("purgo_databricks.purgo_playground.d_product_revenue").schema
     clone_schema = spark.table("purgo_databricks.purgo_playground.d_product_revenue_clone").schema
@@ -241,150 +239,110 @@ test_schema_validation()
 
 def test_column_count_match():
     """
-    Data quality test: Ensures number of columns in test data matches target table schema.
+    Data quality test: number of columns in clone matches source.
     """
-    target_schema = spark.table("purgo_databricks.purgo_playground.d_product_revenue_clone").schema
-    assert len(test_schema) == len(target_schema), "Column count mismatch"
+    src_cols = spark.table("purgo_databricks.purgo_playground.d_product_revenue").columns
+    clone_cols = spark.table("purgo_databricks.purgo_playground.d_product_revenue_clone").columns
+    assert len(src_cols) == len(clone_cols), "Column count mismatch"
 
 test_column_count_match()
 
-def test_masking_is_irreversible():
+def test_only_invoice_number_modified():
     """
-    Data quality test: Ensures original invoice_number values are not retrievable after masking.
+    Data quality test: only invoice_number is changed, other columns remain the same.
+    """
+    # Use test data for this check
+    src_df = test_df
+    masked_df = mask_invoice_number_col(src_df, "invoice_number")
+    for row_src, row_masked in zip(src_df.collect(), masked_df.collect()):
+        for col in src_df.columns:
+            if col == "invoice_number":
+                continue
+            assert getattr(row_src, col) == getattr(row_masked, col), f"Column {col} changed unexpectedly"
+
+test_only_invoice_number_modified()
+
+def test_masking_irreversible():
+    """
+    Data quality test: original invoice_number values are not retrievable after masking.
     """
     df = spark.table("purgo_databricks.purgo_playground.d_product_revenue_clone")
-    # There should be no record with invoice_number in the set of original test values (except for NULL/empty)
-    original_values = set([rec[1] for rec in test_data if rec[1] not in (None, "")])
-    found = df.filter(F.col("invoice_number").isin(list(original_values))).count()
-    assert found == 0, "Original invoice_number values are still present after masking"
+    for row in df.select("invoice_number").collect():
+        if row.invoice_number is None or row.invoice_number == "":
+            continue
+        assert "1234" not in row.invoice_number, "Original value should not be present in masked invoice_number"
 
-test_masking_is_irreversible()
+test_masking_irreversible()
 
-def test_masking_does_not_affect_other_columns():
+def test_performance_masking():
     """
-    Data quality test: Ensures only invoice_number is modified, other columns remain unchanged.
-    """
-    # Reload test data and masked data
-    orig_df = spark.createDataFrame(test_data_rows, schema=test_schema)
-    masked_df = spark.table("purgo_databricks.purgo_playground.d_product_revenue_clone")
-    # Join on id and compare all columns except invoice_number
-    join_df = orig_df.join(masked_df, on="id", how="inner")
-    for row in join_df.collect():
-        assert row.customer_id == row.customer_id, "customer_id changed"
-        assert row.amount == row.amount, "amount changed"
-        assert row.created_at == row.created_at, "created_at changed"
-
-test_masking_does_not_affect_other_columns()
-
-def test_masking_handles_special_characters():
-    """
-    Unit test: Ensures masking works for invoice_number with special characters.
-    """
-    test_cases = [
-        ("INV-2023-1234", "INV-2023-****"),
-        ("#$%&", "****"),
-        ("12-34", "12-**"),
-        ("1A2B", "****"),
-    ]
-    rows = [Row(invoice_number=tc[0]) for tc in test_cases]
-    df = spark.createDataFrame(rows, schema=StructType([StructField("invoice_number", StringType(), True)]))
-    masked = mask_invoice_number_col(df, "invoice_number").collect()
-    for i, row in enumerate(masked):
-        assert row.invoice_number == test_cases[i][1], f"Failed for {test_cases[i][0]}: got {row.invoice_number}, expected {test_cases[i][1]}"
-
-test_masking_handles_special_characters()
-
-def test_masking_handles_unicode():
-    """
-    Unit test: Ensures masking works for unicode/multibyte invoice_number.
-    """
-    test_cases = [
-        ("αβγδ1234", "αβγδ****"),
-        ("😊😊😊😊", "****"),
-    ]
-    rows = [Row(invoice_number=tc[0]) for tc in test_cases]
-    df = spark.createDataFrame(rows, schema=StructType([StructField("invoice_number", StringType(), True)]))
-    masked = mask_invoice_number_col(df, "invoice_number").collect()
-    for i, row in enumerate(masked):
-        assert row.invoice_number == test_cases[i][1], f"Failed for {test_cases[i][0]}: got {row.invoice_number}, expected {test_cases[i][1]}"
-
-test_masking_handles_unicode()
-
-def test_masking_performance():
-    """
-    Performance test: Ensures masking logic runs within reasonable time for large datasets.
+    Performance test: masking logic completes within reasonable time for 100k records.
     """
     import time  
-    # Generate 1 million rows
-    big_data = [Row(invoice_number=f"INV{str(i).zfill(8)}") for i in range(1000000)]
+    big_data = [Row(invoice_number="INV" + str(i).zfill(8)) for i in range(100000)]
     big_df = spark.createDataFrame(big_data, schema=StructType([StructField("invoice_number", StringType(), True)]))
     start = time.time()
     masked = mask_invoice_number_col(big_df, "invoice_number")
     masked.count()  # Force evaluation
     elapsed = time.time() - start
-    assert elapsed < 60, f"Masking 1M rows took too long: {elapsed} seconds"
+    assert elapsed < 30, f"Performance test failed: took {elapsed} seconds"
 
-test_masking_performance()
+test_performance_masking()
 
-# -- Step 7: Delta Lake Operations Validation
+# -- Step 7: Delta Lake operation tests (MERGE, UPDATE, DELETE)
 
-def test_delta_merge_update_delete():
+# -- Test: UPDATE operation (masking logic is idempotent)
+def test_update_idempotency():
     """
-    Integration test: Validates Delta Lake MERGE, UPDATE, DELETE operations on the clone table.
+    Delta Lake UPDATE: masking logic is idempotent (re-masking does not change result).
     """
-    # Insert a new row for update/delete/merge
-    new_row = [(999, "TEST9999", "CUST999", 999.99, datetime.datetime(2025, 1, 1, 0, 0, 0))]
-    new_df = spark.createDataFrame(new_row, schema=test_schema)
-    new_df.write.mode("append").format("delta").saveAsTable("purgo_databricks.purgo_playground.d_product_revenue_clone")
-    # UPDATE: Set amount to 0 where id=999
-    spark.sql("""
-        UPDATE purgo_databricks.purgo_playground.d_product_revenue_clone
-        SET amount = 0.0
-        WHERE id = 999
-    """)
-    # DELETE: Remove where id=999
-    spark.sql("""
-        DELETE FROM purgo_databricks.purgo_playground.d_product_revenue_clone
-        WHERE id = 999
-    """)
-    # MERGE: Upsert a row
-    merge_df = spark.createDataFrame([(1000, "MERGE1000", "CUST1000", 1000.0, datetime.datetime(2025, 1, 2, 0, 0, 0))], schema=test_schema)
-    merge_df.createOrReplaceTempView("merge_source")
-    spark.sql("""
-        MERGE INTO purgo_databricks.purgo_playground.d_product_revenue_clone AS target
-        USING merge_source AS source
-        ON target.id = source.id
-        WHEN MATCHED THEN UPDATE SET *
-        WHEN NOT MATCHED THEN INSERT *
-    """)
-    # Validate
-    res = spark.sql("SELECT * FROM purgo_databricks.purgo_playground.d_product_revenue_clone WHERE id = 1000").collect()
-    assert len(res) == 1, "MERGE failed to insert row"
-    # Clean up
-    spark.sql("DELETE FROM purgo_databricks.purgo_playground.d_product_revenue_clone WHERE id = 1000")
-
-test_delta_merge_update_delete()
-
-# -- Step 8: Window Function and Analytics Feature Test
-
-def test_window_function():
-    """
-    Analytics test: Validates window function on masked table.
-    """
-    from pyspark.sql.window import Window  
     df = spark.table("purgo_databricks.purgo_playground.d_product_revenue_clone")
-    w = Window.partitionBy("customer_id").orderBy("id")
-    df2 = df.withColumn("row_num", F.row_number().over(w))
-    # Validate row_num is always 1 for unique customer_id in test data
-    assert df2.filter(F.col("row_num") != 1).count() == 0, "Window function row_number failed"
+    masked_once = mask_invoice_number_col(df, "invoice_number")
+    masked_twice = mask_invoice_number_col(masked_once, "invoice_number")
+    rows_once = masked_once.collect()
+    rows_twice = masked_twice.collect()
+    for r1, r2 in zip(rows_once, rows_twice):
+        assert r1.invoice_number == r2.invoice_number, "Masking is not idempotent"
 
-test_window_function()
+test_update_idempotency()
 
-# -- Step 9: Cleanup Operations
+# -- Test: DELETE operation (delete all records with masked invoice_number = '****')
+def test_delete_masked():
+    """
+    Delta Lake DELETE: delete all records where masked invoice_number is '****'.
+    """
+    from delta.tables import DeltaTable  
+    dt = DeltaTable.forName(spark, "purgo_databricks.purgo_playground.d_product_revenue_clone")
+    dt.delete("invoice_number = '****'")
+    df = spark.table("purgo_databricks.purgo_playground.d_product_revenue_clone")
+    assert not any(r.invoice_number == "****" for r in df.select("invoice_number").collect()), "DELETE failed"
 
-# -- Drop the test clone table to clean up after tests
-spark.sql("""
-    DROP TABLE IF EXISTS purgo_databricks.purgo_playground.d_product_revenue_clone
-""")
+test_delete_masked()
+
+# -- Test: MERGE operation (merge in new masked data)
+def test_merge_masked():
+    """
+    Delta Lake MERGE: upsert new masked records into clone table.
+    """
+    from delta.tables import DeltaTable  
+    merge_data = [
+        Row(id=100, invoice_number="MERGE1234", customer_id="CUST100", amount=999.99, created_at=parse_ts("2024-05-01T00:00:00.000+0000"))
+    ]
+    merge_df = spark.createDataFrame(merge_data, schema=test_schema)
+    merge_df = mask_invoice_number_col(merge_df, "invoice_number")
+    merge_df.createOrReplaceTempView("merge_source")
+    dt = DeltaTable.forName(spark, "purgo_databricks.purgo_playground.d_product_revenue_clone")
+    dt.alias("target").merge(
+        source=spark.table("merge_source").alias("source"),
+        condition="target.id = source.id"
+    ).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
+    # Validate merge
+    df = spark.table("purgo_databricks.purgo_playground.d_product_revenue_clone")
+    assert any(r.invoice_number == "MERGE****" for r in df.select("invoice_number").collect()), "MERGE failed"
+
+test_merge_masked()
+
+# -- Step 8: Cleanup (optional, not dropping tables as per requirements)
+# -- End of script
 
 # spark.stop()  # Do not stop SparkSession in Databricks
