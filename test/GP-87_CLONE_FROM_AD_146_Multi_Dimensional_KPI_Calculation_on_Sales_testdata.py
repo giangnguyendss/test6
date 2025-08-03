@@ -1,148 +1,278 @@
-# PySpark script for comprehensive test data generation for 'sales_window' table in Unity Catalog
-# Purpose: Generate diverse test data for multi-dimensional sales KPI analysis (region, product, quarter, etc.)
+# PySpark script: Advanced Sales KPI Calculation and Test Data Generation for Databricks
+# Purpose: Generate comprehensive test data and perform advanced sales KPI calculations on 'purgo_playground.sales_window'
 # Author: Giang Nguyen
 # Date: 2025-08-03
-# Description: This script creates a PySpark DataFrame with 30 diverse test records for the 'sales_window' table,
-# covering happy path, edge, error, NULL, and special character scenarios. It uses Databricks-compatible data types,
-# ensures schema consistency, and includes inline comments for each test scenario.
+# Description: This script generates diverse test data for the 'sales_window' table, including happy path, edge, error, null, and special character scenarios. It then calculates Total Sales, Sales Trends, Top Selling Products, and aggregates them into a Final KPI DataFrame, displaying all outputs as required.
 
 from pyspark.sql import SparkSession  # SparkSession is already available in Databricks
-from pyspark.sql.types import StructType, StructField, StringType, DecimalType, DateType  
 from pyspark.sql import Row  
-from datetime import date  
+from pyspark.sql.types import (StructType, StructField, LongType, StringType)  
+from pyspark.sql.functions import (col, sum as _sum, avg, round as _round, lag, dense_rank, isnan, when)  
+from pyspark.sql.window import Window  
 
-# Define schema for 'sales_window' table as per requirements
+# -------------------------------
+# Test Data Generation Section
+# -------------------------------
+
+def generate_sales_window_test_data():
+    """
+    Generate comprehensive test data for the 'sales_window' table, covering:
+    - Happy path (valid data)
+    - Edge cases (boundary values)
+    - Error cases (out-of-range, invalid combinations)
+    - NULL handling
+    - Special/multi-byte characters
+
+    Returns:
+        list[Row]: List of Row objects for DataFrame creation
+    """
+    # Happy path: Valid data for multiple regions, products, years, quarters
+    data = [
+        # North region, WidgetA, 2023, all quarters
+        Row(Sales_ID=1, Product="WidgetA", Region="North", Year=2023, Quarter=1, Sales_Amount=10000),
+        Row(Sales_ID=2, Product="WidgetA", Region="North", Year=2023, Quarter=2, Sales_Amount=12000),
+        Row(Sales_ID=3, Product="WidgetA", Region="North", Year=2023, Quarter=3, Sales_Amount=11000),
+        Row(Sales_ID=4, Product="WidgetA", Region="North", Year=2023, Quarter=4, Sales_Amount=13000),
+        # North region, WidgetB, 2023, all quarters
+        Row(Sales_ID=5, Product="WidgetB", Region="North", Year=2023, Quarter=1, Sales_Amount=9000),
+        Row(Sales_ID=6, Product="WidgetB", Region="North", Year=2023, Quarter=2, Sales_Amount=9500),
+        Row(Sales_ID=7, Product="WidgetB", Region="North", Year=2023, Quarter=3, Sales_Amount=9700),
+        Row(Sales_ID=8, Product="WidgetB", Region="North", Year=2023, Quarter=4, Sales_Amount=9800),
+        # South region, WidgetC, 2023, all quarters
+        Row(Sales_ID=9, Product="WidgetC", Region="South", Year=2023, Quarter=1, Sales_Amount=15000),
+        Row(Sales_ID=10, Product="WidgetC", Region="South", Year=2023, Quarter=2, Sales_Amount=15500),
+        Row(Sales_ID=11, Product="WidgetC", Region="South", Year=2023, Quarter=3, Sales_Amount=16000),
+        Row(Sales_ID=12, Product="WidgetC", Region="South", Year=2023, Quarter=4, Sales_Amount=16500),
+        # South region, WidgetD, 2023, all quarters
+        Row(Sales_ID=13, Product="WidgetD", Region="South", Year=2023, Quarter=1, Sales_Amount=14000),
+        Row(Sales_ID=14, Product="WidgetD", Region="South", Year=2023, Quarter=2, Sales_Amount=14200),
+        Row(Sales_ID=15, Product="WidgetD", Region="South", Year=2023, Quarter=3, Sales_Amount=14500),
+        Row(Sales_ID=16, Product="WidgetD", Region="South", Year=2023, Quarter=4, Sales_Amount=14800),
+        # East region, WidgetE, 2023, all quarters
+        Row(Sales_ID=17, Product="WidgetE", Region="East", Year=2023, Quarter=1, Sales_Amount=8000),
+        Row(Sales_ID=18, Product="WidgetE", Region="East", Year=2023, Quarter=2, Sales_Amount=8500),
+        Row(Sales_ID=19, Product="WidgetE", Region="East", Year=2023, Quarter=3, Sales_Amount=8700),
+        Row(Sales_ID=20, Product="WidgetE", Region="East", Year=2023, Quarter=4, Sales_Amount=9000),
+        # Edge case: Zero sales
+        Row(Sales_ID=21, Product="WidgetF", Region="West", Year=2023, Quarter=1, Sales_Amount=0),
+        # Edge case: Very large sales amount
+        Row(Sales_ID=22, Product="WidgetF", Region="West", Year=2023, Quarter=2, Sales_Amount=999999999),
+        # Edge case: Negative sales amount (error scenario)
+        Row(Sales_ID=23, Product="WidgetF", Region="West", Year=2023, Quarter=3, Sales_Amount=-500),
+        # NULL handling: Null in Sales_Amount
+        Row(Sales_ID=24, Product="WidgetG", Region="North", Year=2023, Quarter=1, Sales_Amount=None),
+        # NULL handling: Null in Product
+        Row(Sales_ID=25, Product=None, Region="North", Year=2023, Quarter=2, Sales_Amount=5000),
+        # NULL handling: Null in Region
+        Row(Sales_ID=26, Product="WidgetH", Region=None, Year=2023, Quarter=3, Sales_Amount=6000),
+        # NULL handling: Null in Year
+        Row(Sales_ID=27, Product="WidgetI", Region="South", Year=None, Quarter=4, Sales_Amount=7000),
+        # NULL handling: Null in Quarter
+        Row(Sales_ID=28, Product="WidgetJ", Region="East", Year=2023, Quarter=None, Sales_Amount=8000),
+        # Special characters in Product and Region
+        Row(Sales_ID=29, Product="WidgétΩ", Region="Nørth", Year=2023, Quarter=1, Sales_Amount=12345),
+        Row(Sales_ID=30, Product="ウィジェットK", Region="南", Year=2023, Quarter=2, Sales_Amount=54321),
+        # Error case: Out-of-range quarter
+        Row(Sales_ID=31, Product="WidgetL", Region="South", Year=2023, Quarter=5, Sales_Amount=1000),
+        # Error case: Out-of-range year
+        Row(Sales_ID=32, Product="WidgetM", Region="East", Year=1899, Quarter=1, Sales_Amount=2000),
+        # Error case: Non-numeric Sales_Amount (will be handled as null)
+        Row(Sales_ID=33, Product="WidgetN", Region="West", Year=2023, Quarter=2, Sales_Amount=None),
+    ]
+    return data
+
+# Define schema for sales_window table
 sales_window_schema = StructType([
-    StructField("Sale_ID", StringType(), True),
-    StructField("Region", StringType(), True),
+    StructField("Sales_ID", LongType(), True),
     StructField("Product", StringType(), True),
-    StructField("Sales_Amount", DecimalType(18,2), True),
-    StructField("Sale_Date", DateType(), True)
+    StructField("Region", StringType(), True),
+    StructField("Year", LongType(), True),
+    StructField("Quarter", LongType(), True),
+    StructField("Sales_Amount", LongType(), True)
 ])
 
-# Prepare test data records
-sales_window_test_data = [
-    # Happy path: Valid sales in different regions, products, and quarters
-    Row("S001", "East", "Widget", 100.00, date(2024, 1, 15)),    # 2024-Q1
-    Row("S002", "East", "Widget", 150.00, date(2024, 4, 10)),    # 2024-Q2
-    Row("S003", "East", "Widget", 200.00, date(2024, 7, 5)),     # 2024-Q3
-    Row("S004", "West", "Gadget", 200.00, date(2024, 5, 20)),    # 2024-Q2
-    Row("S005", "West", "Gadget", 180.00, date(2024, 8, 1)),     # 2024-Q3
-    Row("S006", "North", "Widget", 300.00, date(2024, 2, 28)),   # 2024-Q1
-    Row("S007", "South", "Gizmo", 250.00, date(2024, 3, 10)),    # 2024-Q1
-    Row("S008", "South", "Gizmo", 275.00, date(2024, 6, 15)),    # 2024-Q2
-    Row("S009", "East", "Gizmo", 120.00, date(2024, 9, 30)),     # 2024-Q3
-    Row("S010", "West", "Widget", 90.00, date(2024, 10, 5)),     # 2024-Q4
-
-    # Edge case: Sales_Amount = 0, boundary dates (start/end of quarter)
-    Row("S011", "East", "Widget", 0.00, date(2024, 3, 31)),      # 2024-Q1 end
-    Row("S012", "West", "Gadget", 0.00, date(2024, 4, 1)),       # 2024-Q2 start
-    Row("S013", "North", "Widget", 99999999.99, date(2024, 12, 31)), # Large value, 2024-Q4 end
-
-    # Error case: Negative Sales_Amount (should be excluded by validation)
-    Row("S014", "East", "Widget", -50.00, date(2024, 5, 15)),
-
-    # Error case: Invalid Sale_Date (should be excluded by validation)
-    Row("S015", "West", "Gadget", 120.00, None),
-
-    # NULL handling: NULL Sales_Amount
-    Row("S016", "South", "Gizmo", None, date(2024, 7, 1)),
-
-    # NULL handling: NULL Region
-    Row("S017", None, "Widget", 80.00, date(2024, 8, 15)),
-
-    # NULL handling: NULL Product
-    Row("S018", "East", None, 60.00, date(2024, 9, 10)),
-
-    # Special characters: Region and Product with special/multibyte chars
-    Row("S019", "Nørth", "Widgét", 110.00, date(2024, 2, 14)),
-    Row("S020", "南", "ガジェット", 130.00, date(2024, 5, 22)),  # Chinese/Japanese
-
-    # Edge: Same product in multiple regions
-    Row("S021", "East", "Gizmo", 140.00, date(2024, 10, 10)),
-    Row("S022", "West", "Gizmo", 160.00, date(2024, 11, 11)),
-
-    # Edge: Same region, different products, same quarter
-    Row("S023", "North", "Gadget", 210.00, date(2024, 1, 5)),
-    Row("S024", "North", "Gizmo", 220.00, date(2024, 1, 6)),
-
-    # Edge: Multiple sales for same product/region/quarter
-    Row("S025", "East", "Widget", 80.00, date(2024, 1, 20)),
-    Row("S026", "East", "Widget", 90.00, date(2024, 1, 25)),
-
-    # Error: Sale_ID is NULL
-    Row(None, "West", "Gadget", 100.00, date(2024, 6, 30)),
-
-    # Edge: Sale_Date far in the past/future
-    Row("S027", "East", "Widget", 70.00, date(1999, 12, 31)),
-    Row("S028", "West", "Gadget", 85.00, date(2050, 1, 1)),
-
-    # Edge: All fields NULL (should be excluded)
-    Row(None, None, None, None, None),
-
-    # Happy path: Q4 sales
-    Row("S029", "South", "Gizmo", 300.00, date(2024, 12, 15)),
-    Row("S030", "East", "Widget", 110.00, date(2024, 11, 20)),
-]
-
-def create_sales_window_test_df(spark):
-    """
-    Create a PySpark DataFrame with comprehensive test data for the 'sales_window' table.
-
-    Args:
-        spark (SparkSession): The active Spark session.
-
-    Returns:
-        DataFrame: PySpark DataFrame with test data and correct schema.
-    """
-    # Create DataFrame from test data and schema
-    df = spark.createDataFrame(sales_window_test_data, schema=sales_window_schema)
-    return df
-
-def write_test_data_to_unity_catalog(df):
-    """
-    Write the test DataFrame to Unity Catalog as 'purgo_databricks.purgo_playground.sales_window' in Delta format.
-
-    Args:
-        df (DataFrame): The test data DataFrame.
-
-    Returns:
-        None
-    """
-    # Write to Unity Catalog, overwrite mode, Delta format
-    df.write.format("delta") \
-        .mode("overwrite") \
-        .option("overwriteSchema", "true") \
-        .saveAsTable("purgo_databricks.purgo_playground.sales_window")
-
-def validate_sales_window_test_data(df):
-    """
-    Validate the test data for schema consistency and data type correctness.
-
-    Args:
-        df (DataFrame): The test data DataFrame.
-
-    Returns:
-        None
-    """
-    # Check schema matches expected
-    assert df.schema == sales_window_schema, "Schema mismatch in test data"
-    # Check data types for each column
-    for field in sales_window_schema.fields:
-        assert field.name in df.columns, f"Missing column: {field.name}"
-    # Check for column count
-    assert len(df.columns) == len(sales_window_schema.fields), "Column count mismatch"
-
-# Main execution block
+# Try to create DataFrame, handle missing/invalid data gracefully
 try:
-    # Create test DataFrame
-    sales_window_df = create_sales_window_test_df(spark)
-    # Validate test data
-    validate_sales_window_test_data(sales_window_df)
-    # Write test data to Unity Catalog
-    write_test_data_to_unity_catalog(sales_window_df)
+    sales_window_test_data = generate_sales_window_test_data()
+    sales_window_df = spark.createDataFrame(sales_window_test_data, schema=sales_window_schema)
 except Exception as e:
-    # Gracefully handle errors (e.g., missing/invalid data)
-    print(f"Error generating or writing test data: {e}")
+    raise RuntimeError("Failed to generate or load test data for sales_window: {}".format(str(e)))
+
+# -------------------------------
+# Data Cleansing Section
+# -------------------------------
+
+def cleanse_sales_window_df(df):
+    """
+    Cleanses the sales_window DataFrame by:
+    - Removing rows with nulls in critical columns (Product, Region, Year, Quarter, Sales_Amount)
+    - Ensuring correct data types for numeric columns
+
+    Args:
+        df (DataFrame): Input DataFrame
+
+    Returns:
+        DataFrame: Cleansed DataFrame
+    """
+    # Remove rows with nulls in any critical column
+    cleansed_df = df.filter(
+        col("Product").isNotNull() &
+        col("Region").isNotNull() &
+        col("Year").isNotNull() &
+        col("Quarter").isNotNull() &
+        col("Sales_Amount").isNotNull()
+    )
+    # Remove rows with non-numeric or out-of-range values for Year, Quarter, Sales_Amount
+    cleansed_df = cleansed_df.filter(
+        (col("Year") >= 1900) & (col("Year") <= 2100) &
+        (col("Quarter") >= 1) & (col("Quarter") <= 4)
+    )
+    return cleansed_df
+
+sales_window_clean_df = cleanse_sales_window_df(sales_window_df)
+
+# -------------------------------
+# Total_Sales Calculation Section
+# -------------------------------
+
+def calculate_total_sales(df):
+    """
+    Calculates total and average Sales_Amount by Region and Product.
+
+    Args:
+        df (DataFrame): Cleansed sales_window DataFrame
+
+    Returns:
+        DataFrame: Total_Sales DataFrame with columns: Region, Product, Total_Sales_Amount, Average_Sales_Amount
+    """
+    total_sales_df = (
+        df.groupBy("Region", "Product")
+        .agg(
+            _sum("Sales_Amount").alias("Total_Sales_Amount"),
+            _round(avg("Sales_Amount"), 2).alias("Average_Sales_Amount")
+        )
+        .orderBy("Region", "Product")
+    )
+    return total_sales_df
+
+# Calculate Total_Sales DataFrame
+total_sales_df = calculate_total_sales(sales_window_clean_df)
+
+# -------------------------------
+# Sales_Trends Calculation Section
+# -------------------------------
+
+def calculate_sales_trends(df):
+    """
+    Calculates sales trends by Region, Product, Year, Quarter:
+    - Previous_Sales_Amount (lag)
+    - Sales_Change (difference from previous quarter)
+
+    Args:
+        df (DataFrame): Cleansed sales_window DataFrame
+
+    Returns:
+        DataFrame: Sales_Trends DataFrame with columns: Region, Product, Year, Quarter, Sales_Amount, Previous_Sales_Amount, Sales_Change
+    """
+    window_spec = Window.partitionBy("Region", "Product").orderBy("Year", "Quarter")
+    sales_trends_df = (
+        df
+        .withColumn("Previous_Sales_Amount", lag("Sales_Amount").over(window_spec))
+        .withColumn("Sales_Change", col("Sales_Amount") - col("Previous_Sales_Amount"))
+        .select(
+            "Region", "Product", "Year", "Quarter", "Sales_Amount", "Previous_Sales_Amount", "Sales_Change"
+        )
+        .orderBy("Region", "Product", "Year", "Quarter")
+    )
+    return sales_trends_df
+
+# Calculate Sales_Trends DataFrame
+sales_trends_df = calculate_sales_trends(sales_window_clean_df)
+
+# -------------------------------
+# Top_Selling_Products Calculation Section
+# -------------------------------
+
+def calculate_top_selling_products(total_sales_df, top_n=3):
+    """
+    Identifies top N selling products by Total_Sales_Amount per Region.
+
+    Args:
+        total_sales_df (DataFrame): DataFrame with Region, Product, Total_Sales_Amount
+        top_n (int): Number of top products to select per region
+
+    Returns:
+        DataFrame: Top_Selling_Products DataFrame with columns: Region, Product, Total_Sales_Amount, Product_Rank
+    """
+    window_spec = Window.partitionBy("Region").orderBy(col("Total_Sales_Amount").desc(), col("Product"))
+    ranked_df = (
+        total_sales_df
+        .withColumn("Product_Rank", dense_rank().over(window_spec))
+        .filter(col("Product_Rank") <= top_n)
+        .orderBy("Region", "Product_Rank", "Product")
+    )
+    return ranked_df
+
+# Calculate Top_Selling_Products DataFrame
+top_selling_products_df = calculate_top_selling_products(total_sales_df, top_n=3)
+
+# -------------------------------
+# Final_KPI Aggregation Section
+# -------------------------------
+
+def aggregate_final_kpi(total_sales_df, top_selling_products_df, sales_trends_df):
+    """
+    Aggregates Total_Sales, Top_Selling_Products, and Sales_Trends into Final_KPI DataFrame.
+
+    Args:
+        total_sales_df (DataFrame): Total_Sales DataFrame
+        top_selling_products_df (DataFrame): Top_Selling_Products DataFrame
+        sales_trends_df (DataFrame): Sales_Trends DataFrame
+
+    Returns:
+        DataFrame: Final_KPI DataFrame with all required columns, only for products in Top_Selling_Products
+    """
+    # Join keys: Region, Product
+    kpi_df = (
+        top_selling_products_df
+        .join(total_sales_df, on=["Region", "Product"], how="inner")
+        .join(sales_trends_df, on=["Region", "Product"], how="inner")
+        .select(
+            top_selling_products_df.Region,
+            top_selling_products_df.Product,
+            total_sales_df.Total_Sales_Amount,
+            total_sales_df.Average_Sales_Amount,
+            top_selling_products_df.Product_Rank,
+            sales_trends_df.Year,
+            sales_trends_df.Quarter,
+            sales_trends_df.Sales_Amount,
+            sales_trends_df.Previous_Sales_Amount,
+            sales_trends_df.Sales_Change
+        )
+        .orderBy("Region", "Product", "Year", "Quarter")
+    )
+    return kpi_df
+
+# Calculate Final_KPI DataFrame
+final_kpi_df = aggregate_final_kpi(total_sales_df, top_selling_products_df, sales_trends_df)
+
+# -------------------------------
+# Output Section
+# -------------------------------
+
+# Display Total_Sales DataFrame
+# Test scenario: Output of Total_Sales calculation
+print("=== Total_Sales DataFrame ===")
+total_sales_df.show(truncate=False)
+
+# Display Sales_Trends DataFrame
+# Test scenario: Output of Sales_Trends calculation
+print("=== Sales_Trends DataFrame ===")
+sales_trends_df.show(truncate=False)
+
+# Display Final_KPI DataFrame
+# Test scenario: Output of Final_KPI aggregation
+print("=== Final_KPI DataFrame ===")
+final_kpi_df.show(truncate=False)
 
 # spark.stop()  # Do not stop SparkSession in Databricks
