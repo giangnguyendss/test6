@@ -1,0 +1,132 @@
+Feature: Transfer active vendor files from Vendor S3 bucket to Purgo S3 folder
+
+  The Databricks PySpark script transfers files from the vendor's S3 bucket to the Purgo S3 folder, ensuring:
+  - Only files not present in either the Purgo or Archive S3 folders are ingested.
+  - Only files marked as active ("A") in the purgo_playground.ingest_config_master.active_flag column are ingested.
+  - S3 folder paths are dynamically retrieved from purgo_playground.ingest_config_master.
+  - AWS credentials are securely accessed from Databricks secret scope "aws_keys" with keys "access_key" and "secret_key".
+
+  Background:
+    Given the Databricks environment is configured with Unity Catalog "purgo_databricks" and schema "purgo_playground"
+    And the AWS credentials are available in Databricks secret scope "aws_keys" as "access_key" and "secret_key"
+    And the ingest_config_master table contains valid S3 paths in columns s3_vendor_path, s3_landing_path, and s3_archive_path
+    And the ingest_config_master table contains the active_flag column with values "A" (active) or "I" (inactive)
+    And the script has access to list files in all three S3 folders: Vendor, Purgo, and Archive
+
+  Scenario: Transfer a single active file not present in Purgo or Archive
+    Given the vendor S3 folder contains file "patient_data_20240601.csv"
+    And the Purgo S3 folder does not contain file "patient_data_20240601.csv"
+    And the Archive S3 folder does not contain file "patient_data_20240601.csv"
+    And ingest_config_master contains a row with file_name = "patient_data_20240601.csv" and active_flag = "A"
+    When the script is executed
+    Then the file "patient_data_20240601.csv" is copied from the vendor S3 folder to the Purgo S3 folder
+    And the file "patient_data_20240601.csv" is not deleted from the vendor S3 folder
+    And a log entry is created in s3_file_process_log with file_status = "SUCCESS" and file_processed_date is set
+
+  Scenario: Do not transfer file if already present in Purgo S3 folder
+    Given the vendor S3 folder contains file "patient_data_20240602.csv"
+    And the Purgo S3 folder contains file "patient_data_20240602.csv"
+    And the Archive S3 folder does not contain file "patient_data_20240602.csv"
+    And ingest_config_master contains a row with file_name = "patient_data_20240602.csv" and active_flag = "A"
+    When the script is executed
+    Then the file "patient_data_20240602.csv" is not copied to the Purgo S3 folder
+    And a log entry is created in s3_file_process_log with file_status = "SKIPPED_EXISTS_PURGO"
+
+  Scenario: Do not transfer file if already present in Archive S3 folder
+    Given the vendor S3 folder contains file "patient_data_20240603.csv"
+    And the Purgo S3 folder does not contain file "patient_data_20240603.csv"
+    And the Archive S3 folder contains file "patient_data_20240603.csv"
+    And ingest_config_master contains a row with file_name = "patient_data_20240603.csv" and active_flag = "A"
+    When the script is executed
+    Then the file "patient_data_20240603.csv" is not copied to the Purgo S3 folder
+    And a log entry is created in s3_file_process_log with file_status = "SKIPPED_EXISTS_ARCHIVE"
+
+  Scenario: Do not transfer file if inactive in ingest_config_master
+    Given the vendor S3 folder contains file "patient_data_20240604.csv"
+    And the Purgo S3 folder does not contain file "patient_data_20240604.csv"
+    And the Archive S3 folder does not contain file "patient_data_20240604.csv"
+    And ingest_config_master contains a row with file_name = "patient_data_20240604.csv" and active_flag = "I"
+    When the script is executed
+    Then the file "patient_data_20240604.csv" is not copied to the Purgo S3 folder
+    And a log entry is created in s3_file_process_log with file_status = "SKIPPED_INACTIVE"
+
+  Scenario: Do not transfer file if not present in ingest_config_master
+    Given the vendor S3 folder contains file "patient_data_20240605.csv"
+    And the Purgo S3 folder does not contain file "patient_data_20240605.csv"
+    And the Archive S3 folder does not contain file "patient_data_20240605.csv"
+    And ingest_config_master does not contain a row with file_name = "patient_data_20240605.csv"
+    When the script is executed
+    Then the file "patient_data_20240605.csv" is not copied to the Purgo S3 folder
+    And a log entry is created in s3_file_process_log with file_status = "SKIPPED_NOT_CONFIGURED"
+
+  Scenario: Error during file transfer
+    Given the vendor S3 folder contains file "patient_data_20240606.csv"
+    And the Purgo S3 folder does not contain file "patient_data_20240606.csv"
+    And the Archive S3 folder does not contain file "patient_data_20240606.csv"
+    And ingest_config_master contains a row with file_name = "patient_data_20240606.csv" and active_flag = "A"
+    And a network error occurs during the file copy operation
+    When the script is executed
+    Then the file "patient_data_20240606.csv" is not present in the Purgo S3 folder
+    And a log entry is created in s3_file_process_log with file_status = "ERROR" and error_message contains "network error"
+
+  Scenario Outline: Data-driven test for multiple files with various statuses
+    Given the vendor S3 folder contains file "<file_name>"
+    And the Purgo S3 folder <purgo_status> file "<file_name>"
+    And the Archive S3 folder <archive_status> file "<file_name>"
+    And ingest_config_master <config_status> a row with file_name = "<file_name>" and active_flag = "<active_flag>"
+    When the script is executed
+    Then the file "<file_name>" <expected_transfer>
+    And a log entry is created in s3_file_process_log with file_status = "<expected_status>"
+
+    Examples:
+      | file_name                | purgo_status | archive_status | config_status | active_flag | expected_transfer                | expected_status           |
+      | patient_data_20240607.csv| does not contain | does not contain | contains     | A          | is copied to the Purgo S3 folder| SUCCESS                   |
+      | patient_data_20240608.csv| contains         | does not contain | contains     | A          | is not copied to the Purgo S3 folder | SKIPPED_EXISTS_PURGO  |
+      | patient_data_20240609.csv| does not contain | contains         | contains     | A          | is not copied to the Purgo S3 folder | SKIPPED_EXISTS_ARCHIVE|
+      | patient_data_20240610.csv| does not contain | does not contain | contains     | I          | is not copied to the Purgo S3 folder | SKIPPED_INACTIVE      |
+      | patient_data_20240611.csv| does not contain | does not contain | does not contain | -     | is not copied to the Purgo S3 folder | SKIPPED_NOT_CONFIGURED|
+
+  Scenario: Retrieve S3 paths from ingest_config_master
+    Given ingest_config_master contains a row with s3_vendor_path = "s3://vendor-bucket/data/", s3_landing_path = "s3://purgo-bucket/landing/", s3_archive_path = "s3://purgo-bucket/archive/"
+    When the script is executed
+    Then the script uses "s3://vendor-bucket/data/" as the vendor S3 folder path
+    And the script uses "s3://purgo-bucket/landing/" as the Purgo S3 folder path
+    And the script uses "s3://purgo-bucket/archive/" as the Archive S3 folder path
+
+  Scenario: Validate file name and path formats
+    Given the vendor S3 folder contains file "patient_data_20240612.csv"
+    And ingest_config_master contains a row with file_name = "patient_data_20240612.csv" and active_flag = "A"
+    When the script is executed
+    Then the file name "patient_data_20240612.csv" must match the pattern "^[a-zA-Z0-9_\-]+\.csv$"
+    And the S3 paths must match the pattern "^s3://[a-z0-9\-]+(/[a-zA-Z0-9_\-/]*)?$"
+
+  Scenario: Use Databricks secrets for AWS credentials
+    Given the Databricks secret scope "aws_keys" contains "access_key" and "secret_key"
+    When the script is executed
+    Then the script retrieves the AWS access key and secret key from the Databricks secret scope "aws_keys"
+    And the script does not log or expose the secret values
+
+  Scenario: Log all file transfer attempts
+    Given the script processes files from the vendor S3 folder
+    When the script is executed
+    Then for each file processed, a row is inserted into s3_file_process_log with columns: file_name, s3_vendor_path, s3_landing_path, s3_archive_path, file_status, file_processed_date
+
+  Scenario: Validation rule - Only files with active_flag = "A" are ingested
+    Given ingest_config_master contains multiple rows with file_name and active_flag values
+    When the script is executed
+    Then only files with active_flag = "A" are considered for transfer
+    And files with active_flag != "A" are skipped with file_status = "SKIPPED_INACTIVE"
+
+  Scenario: Error if S3 path is missing in ingest_config_master
+    Given ingest_config_master contains a row with file_name = "patient_data_20240613.csv" and active_flag = "A"
+    And s3_vendor_path is null
+    When the script is executed
+    Then the script fails with error message "Missing S3 vendor path in ingest_config_master for file patient_data_20240613.csv"
+    And a log entry is created in s3_file_process_log with file_status = "ERROR" and error_message contains "Missing S3 vendor path"
+
+  Scenario: Error if AWS credentials are missing
+    Given the Databricks secret scope "aws_keys" does not contain "access_key" or "secret_key"
+    When the script is executed
+    Then the script fails with error message "Missing AWS credentials in Databricks secret scope aws_keys"
+    And no files are transferred
+    And a log entry is created in s3_file_process_log with file_status = "ERROR" and error_message contains "Missing AWS credentials"
