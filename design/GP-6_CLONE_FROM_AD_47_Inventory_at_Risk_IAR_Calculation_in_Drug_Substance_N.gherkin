@@ -1,0 +1,119 @@
+Feature: Real-time Calculation of Inventory at Risk Due to DNSA Events
+
+  As a life sciences manufacturer,
+  I want to calculate the inventory_at_risk and its percentage of total inventory
+  when a DNSA event occurs, using data from purgo_playground.f_inv_movmnt,
+  so that I can assess financial and operational exposure in real-time.
+
+  Background:
+    Given the source table is purgo_playground.f_inv_movmnt
+    And the relevant columns are txn_id, financial_qty, flag_active
+    And the DNSA event is indicated by the dnsa_flag field (assumed to exist as dnsa_flag in f_inv_movmnt)
+    And flag_active values are 'Y' for active inventory and 'N' for inactive
+    And financial_qty is a double representing the quantity at financial risk
+    And total inventory is defined as the sum of financial_qty for all rows with flag_active = 'Y'
+    And inventory_at_risk is defined as the sum of financial_qty for all rows with flag_active = 'Y' and dnsa_flag = 'Y'
+    And the percentage of inventory at risk is calculated as (inventory_at_risk / total_inventory) * 100
+    And all calculations are performed in real-time using Spark SQL
+
+  Scenario: Calculate inventory_at_risk and percentage for a DNSA event (happy path)
+    Given there are rows in f_inv_movmnt with flag_active = 'Y' and dnsa_flag = 'Y'
+    When the sum of financial_qty is calculated for these rows as inventory_at_risk
+    And the sum of financial_qty is calculated for all rows with flag_active = 'Y' as total_inventory
+    Then inventory_at_risk must be a non-negative double value
+    And total_inventory must be a non-negative double value
+    And percentage_of_inventory_at_risk is calculated as (inventory_at_risk / total_inventory) * 100
+    And percentage_of_inventory_at_risk must be between 0 and 100 inclusive
+
+  Scenario: No DNSA event present (inventory not at risk)
+    Given there are no rows in f_inv_movmnt with dnsa_flag = 'Y' and flag_active = 'Y'
+    When inventory_at_risk is calculated
+    Then inventory_at_risk must be 0
+    And percentage_of_inventory_at_risk must be 0
+
+  Scenario: No active inventory present (error scenario)
+    Given there are no rows in f_inv_movmnt with flag_active = 'Y'
+    When total_inventory is calculated
+    Then total_inventory must be 0
+    And percentage_of_inventory_at_risk calculation must return error "No active inventory available for calculation"
+    And inventory_at_risk must be 0
+
+  Scenario: Data validation for financial_qty values
+    Given financial_qty values in f_inv_movmnt may be negative, zero, or positive
+    When calculating inventory_at_risk and total_inventory
+    Then only rows with financial_qty >= 0 are included in the sum
+    And rows with financial_qty < 0 are excluded from both inventory_at_risk and total_inventory
+    And an error message "Invalid financial_qty detected: negative values excluded from calculation" is logged if any negative values are found
+
+  Scenario Outline: Data-driven calculation of inventory_at_risk and percentage
+    Given the following rows in f_inv_movmnt:
+      | txn_id | financial_qty | flag_active | dnsa_flag |
+      | <txn_id> | <financial_qty> | <flag_active> | <dnsa_flag> |
+    When inventory_at_risk and total_inventory are calculated as per rules
+    Then the result for inventory_at_risk is <expected_inventory_at_risk>
+    And the result for total_inventory is <expected_total_inventory>
+    And the result for percentage_of_inventory_at_risk is <expected_percentage>
+    Examples:
+      | txn_id | financial_qty | flag_active | dnsa_flag | expected_inventory_at_risk | expected_total_inventory | expected_percentage |
+      | T001   | 100.0         | Y           | Y         | 100.0                      | 100.0                   | 100.0              |
+      | T002   | 50.0          | Y           | N         | 0.0                        | 50.0                    | 0.0                |
+      | T003   | 30.0          | N           | Y         | 0.0                        | 0.0                     | 0.0                |
+      | T004   | -10.0         | Y           | Y         | 0.0                        | 0.0                     | 0.0                |
+      | T005   | 60.0          | Y           | Y         | 60.0                       | 60.0                    | 100.0              |
+      | T006   | 40.0          | Y           | N         | 0.0                        | 40.0                    | 0.0                |
+      | T007   | 20.0          | Y           | Y         | 20.0                       | 20.0                    | 100.0              |
+      | T008   | 0.0           | Y           | Y         | 0.0                        | 0.0                     | 0.0                |
+
+  Scenario: Error handling for missing dnsa_flag field
+    Given the dnsa_flag field is not present in f_inv_movmnt
+    When the calculation is attempted
+    Then an error message "DNSA flag not found in source table: purgo_playground.f_inv_movmnt" is returned
+    And inventory_at_risk and percentage_of_inventory_at_risk are not calculated
+
+  Scenario: Real-time calculation requirements
+    Given the calculation must be performed in real-time
+    When new rows are inserted or updated in f_inv_movmnt
+    Then the inventory_at_risk and percentage_of_inventory_at_risk must be recalculated within 1 minute of data change
+    And the calculation must use the latest available data snapshot
+
+  Scenario: Validation of calculation output format
+    Given the calculation is performed
+    When the results are returned
+    Then inventory_at_risk and total_inventory must be returned as double values with up to 2 decimal places
+    And percentage_of_inventory_at_risk must be returned as a double value with up to 2 decimal places
+
+  Scenario: Filtering by additional attributes (plant, stock_type, item_nbr)
+    Given the calculation may be filtered by plant_loc_cd, stock_type, or item_nbr
+    When filters are applied
+    Then only rows matching the filter criteria are included in both inventory_at_risk and total_inventory calculations
+    And the percentage_of_inventory_at_risk is calculated based on the filtered data set
+
+  Scenario Outline: Error scenarios for invalid input data
+    Given the following invalid input data in f_inv_movmnt:
+      | txn_id | financial_qty | flag_active | dnsa_flag |
+      | <txn_id> | <financial_qty> | <flag_active> | <dnsa_flag> |
+    When the calculation is performed
+    Then the system returns error "<expected_error_message>"
+    Examples:
+      | txn_id | financial_qty | flag_active | dnsa_flag | expected_error_message                                 |
+      | T009   | NULL          | Y           | Y         | "Missing financial_qty value for txn_id T009"          |
+      | T010   | 20.0          | NULL        | Y         | "Missing flag_active value for txn_id T010"            |
+      | T011   | 30.0          | Y           | NULL      | "Missing dnsa_flag value for txn_id T011"              |
+      | T012   | -5.0          | Y           | Y         | "Invalid financial_qty detected: negative values excluded from calculation" |
+
+  Scenario: Calculation for historical trending (if required)
+    Given the calculation is required for a specific as-of-date
+    When the as-of-date filter is applied to crt_dt or updt_dt
+    Then only rows with crt_dt or updt_dt <= as-of-date are included in the calculation
+    And inventory_at_risk and percentage_of_inventory_at_risk are calculated for that historical snapshot
+
+  Scenario: Joining with dimension tables (if enrichment required)
+    Given enrichment is required from d_product for additional attributes
+    When joining f_inv_movmnt with d_product on item_nbr and plant_loc_cd
+    Then only rows with matching item_nbr and plant_loc_cd in both tables are included in the calculation
+    And additional filters from d_product (e.g., prod_line, stock_type) may be applied as needed
+
+  Scenario: Data freshness validation
+    Given the calculation is performed in real-time
+    When the latest data is not available (e.g., data lag > 1 minute)
+    Then an error message "Data freshness requirement not met: latest snapshot unavailable" is returned
